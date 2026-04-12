@@ -1,7 +1,7 @@
 name: Build OpenWrt
 
 on:
-  workflow_dispatch:
+  workflow_dispatch
 
 jobs:
   build:
@@ -12,19 +12,28 @@ jobs:
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
-          path: openwrt
+          path: OpenWrt
 
-      - name: Setup environment
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y build-essential libncurses5-dev libssl-dev python3-pip git unzip wget
+          sudo apt install -y build-essential libncurses5-dev libssl-dev python3 git unzip wget
 
-      - name: Copy config
-        run: cp .config openwrt/.config
+      - name: Generate MT7628 config
+        working-directory: OpenWrt
+        run: |
+          make defconfig
+          sed -i 's/^# CONFIG_TARGET_ramips_mt7628.*/CONFIG_TARGET_ramips_mt7628=y/' .config
+          make defconfig
 
       - name: Build firmware
-        working-directory: openwrt
+        working-directory: OpenWrt
         run: |
-          make -j$(nproc) defconfig
-          make -j$(nproc) download
+          make download -j$(nproc)
           make -j$(nproc)
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt-Firmware
+          path: OpenWrt/bin/targets/ramips/mt7628/*.bin
