@@ -1,33 +1,31 @@
-name: Build OpenWrt 23.05 for MT7628 with 4G (Stable)
+name: Build OpenWrt 23.05 for MT7628 with 4G (FAST)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
-      - name: 安装编译依赖
+      - name: 安装依赖
         run: |
           sudo apt update
-          sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config ccache gcc-multilib g++-multilib
+          sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib
 
-      - name: 拉取 OpenWrt 官方源码 (23.05)
+      - name: 拉取 OpenWrt 源码
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
           fetch-depth: 1
 
-      - name: 创建内置配置 (自动APN + 预置网络 + PCIe 修复脚本)
+      - name: 创建配置文件
         run: |
           mkdir -p files/etc/hotplug.d/iface files/etc/config files/etc/uci-defaults
-          
-          # 自动APN脚本
           cat > files/etc/hotplug.d/iface/99-auto-apn <<'EOF'
           #!/bin/sh
           [ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "4g" ] || exit 0
-          logger -t "auto-apn" "4G up, detecting APN..."
           sleep 5
           MODEM_NUM=$(mmcli -L 2>/dev/null | grep -oE '[0-9]+' | head -1)
           [ -z "$MODEM_NUM" ] && exit 1
@@ -41,15 +39,13 @@ jobs:
               *)                             APN="" ;;
           esac
           if [ -n "$APN" ] && [ "$(uci -q get network.4g.apn)" != "$APN" ]; then
-              logger -t "auto-apn" "Set APN to $APN"
               uci set network.4g.apn="$APN"
               uci commit network
               /etc/init.d/network reload
           fi
           EOF
           chmod +x files/etc/hotplug.d/iface/99-auto-apn
-          
-          # 预置网络接口 (4G + LAN)
+
           cat > files/etc/config/network <<'EOF'
           config interface 'loopback'
           	option device 'lo'
@@ -73,11 +69,9 @@ jobs:
           	option apn ''
           	option autoconnect '1'
           EOF
-          
-          # PCIe 启用脚本 (首次启动时自动执行)
+
           cat > files/etc/uci-defaults/99-enable-pcie <<'EOF'
           #!/bin/sh
-          # 检查是否已经打过补丁
           if [ ! -f /lib/firmware/pcie-fix.dtb ]; then
               cat > /tmp/pcie-fix.dts <<'DTS'
           /dts-v1/;
@@ -89,13 +83,12 @@ jobs:
               dtc -I dts -O dtb /tmp/pcie-fix.dts -o /lib/firmware/pcie-fix.dtb
               uci set system.@system[0].overlay="/lib/firmware/pcie-fix.dtb"
               uci commit system
-              logger -t "pcie-fix" "PCIe enabled via device tree overlay, rebooting once..."
               reboot
           fi
           EOF
           chmod +x files/etc/uci-defaults/99-enable-pcie
 
-      - name: 写入精简编译配置
+      - name: 写入配置
         run: |
           cat > .config <<'EOF'
           CONFIG_TARGET_ramips=y
@@ -130,23 +123,22 @@ jobs:
           # CONFIG_IPV6 is not set
           EOF
 
-      - name: 生成完整配置
+      - name: 生成配置
         run: make defconfig
 
-      - name: 更新并安装 feeds
+      - name: 更新 feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 下载所有依赖包
-        run: make download -j$(nproc)
+      - name: 下载包
+        run: make download -j16
 
-      - name: 开始编译固件
-        run: make -j$(nproc) V=s
+      - name: 编译
+        run: make -j16 V=s
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: OpenWrt-MT7628-4G-AutoAPN
+          name: OpenWrt-MT7628-4G
           path: bin/targets/ramips/mt76x8/*sysupgrade.bin
-          if-no-files-found: error
