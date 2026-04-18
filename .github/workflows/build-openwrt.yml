@@ -21,7 +21,7 @@ jobs:
 
       - name: Create embedded config files
         run: |
-          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface
+          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface files/etc/config
 
           cat > files/etc/uci-defaults/99-auto-fix <<'EOF'
           #!/bin/sh
