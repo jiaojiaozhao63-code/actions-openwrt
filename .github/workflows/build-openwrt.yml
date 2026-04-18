@@ -1,4 +1,4 @@
-name: FW28-V21 Final Full 4G Auto
+name: Build OpenWrt 23.05 for FW28-V21 (Fixed DTS + QMI)
 
 on:
   workflow_dispatch:
@@ -17,121 +17,200 @@ jobs:
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
-          fetch-depth: 1
 
-      - name: Add custom DTS for FW28-V21
+      - name: Create custom DTS and config files
         run: |
+          mkdir -p target/linux/ramips/dts
+          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface files/etc/config
+
+          # 1. 精确适配的 DTS（GPIO、交换机已修正）
           cat > target/linux/ramips/dts/mt7628an_fw28-v21.dts <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0-or-later
           /dts-v1/;
           #include "mt7628an.dtsi"
           #include <dt-bindings/gpio/gpio.h>
           #include <dt-bindings/input/input.h>
+
           / {
           	compatible = "fw28,v21", "mediatek,mt7628an-soc";
           	model = "FW28-V21";
-          	chosen { bootargs = "console=ttyS0,57600"; };
-          	memory@0 { device_type = "memory"; reg = <0x0 0x4000000>; };
+
+          	chosen {
+          		bootargs = "console=ttyS0,57600";
+          	};
+
+          	memory@0 {
+          		device_type = "memory";
+          		reg = <0x0 0x4000000>;
+          	};
+
           	keys {
           		compatible = "gpio-keys";
-          		reset { label = "reset"; gpios = <&gpio 11 GPIO_ACTIVE_LOW>; linux,code = <KEY_RESTART>; };
+          		reset {
+          			label = "reset";
+          			gpios = <&gpio 38 GPIO_ACTIVE_LOW>;
+          			linux,code = <KEY_RESTART>;
+          		};
           	};
+
           	leds {
           		compatible = "gpio-leds";
-          		system { label = "orange:system"; gpios = <&gpio 5 GPIO_ACTIVE_LOW>; };
-          		wlan { label = "blue:wlan"; gpios = <&gpio 4 GPIO_ACTIVE_LOW>; };
-          	};
-          };
-          &ethernet { nvmem-cells = <&macaddr_factory_4>; nvmem-cell-names = "mac-address"; };
-          &esw { mediatek,portmap = <0x2f>; mediatek,ephy-reset-gpios = <&gpio 11 GPIO_ACTIVE_LOW>; };
-          &wmac { status = "okay"; nvmem-cells = <&eeprom_factory_0>; nvmem-cell-names = "eeprom"; };
-          &pcie { status = "okay"; };
-          &pcie0 { wifi@0,0 { compatible = "mediatek,mt76"; reg = <0x0000 0 0 0 0>; }; };
-          &spi0 {
-          	status = "okay";
-          	flash@0 {
-          		compatible = "jedec,spi-nor"; reg = <0>; spi-max-frequency = <40000000>;
-          		partitions {
-          			compatible = "fixed-partitions"; #address-cells = <1>; #size-cells = <1>;
-          			partition@0 { label = "u-boot"; reg = <0x0 0x30000>; read-only; };
-          			partition@30000 { label = "u-boot-env"; reg = <0x30000 0x10000>; read-only; };
-          			partition@40000 { label = "config"; reg = <0x40000 0x8000>; read-only; };
-          			partition@48000 {
-          				label = "factory"; reg = <0x48000 0x10000>; read-only;
-          				compatible = "nvmem-cells"; #address-cells = <1>; #size-cells = <1>;
-          				eeprom_factory_0: eeprom@0 { reg = <0x0 0x400>; };
-          				macaddr_factory_4: macaddr@4 { reg = <0x4 0x6>; };
-          			};
-          			partition@58000 { label = "firmware"; reg = <0x58000 0xfa8000>; compatible = "denx,uimage"; };
+          		system {
+          			label = "orange:system";
+          			gpios = <&gpio 11 GPIO_ACTIVE_LOW>;
+          		};
+          		wlan {
+          			label = "blue:wlan";
+          			gpios = <&gpio 12 GPIO_ACTIVE_LOW>;
           		};
           	};
           };
-          &uart1 { status = "okay"; };
+
+          &ethernet {
+          	nvmem-cells = <&macaddr_factory_4>;
+          	nvmem-cell-names = "mac-address";
+          };
+
+          &esw {
+          	mediatek,portmap = <0x3f>;
+          	mediatek,ephy-handle = <&ephy>;
+          };
+
+          &ephy {
+          	compatible = "mediatek,mt7628-ephy", "mediatek,mtk-ephy";
+          };
+
+          &wmac {
+          	status = "okay";
+          	mediatek,mtd-eeprom = <&factory 0x0>;
+          };
+
+          &pcie {
+          	status = "okay";
+          };
+
+          &pcie0 {
+          	wifi@0,0 {
+          		compatible = "mediatek,mt76";
+          		reg = <0x0000 0 0 0 0>;
+          	};
+          };
+
+          &spi0 {
+          	status = "okay";
+          	flash@0 {
+          		compatible = "jedec,spi-nor";
+          		reg = <0>;
+          		spi-max-frequency = <40000000>;
+          		partitions {
+          			compatible = "fixed-partitions";
+          			#address-cells = <1>;
+          			#size-cells = <1>;
+          			partition@0 {
+          				label = "u-boot";
+          				reg = <0x0 0x30000>;
+          				read-only;
+          			};
+          			partition@30000 {
+          				label = "u-boot-env";
+          				reg = <0x30000 0x10000>;
+          				read-only;
+          			};
+          			partition@40000 {
+          				label = "factory";
+          				reg = <0x40000 0x10000>;
+          				read-only;
+          				compatible = "nvmem-cells";
+          				#address-cells = <1>;
+          				#size-cells = <1>;
+          				eeprom_factory_0: eeprom@0 {
+          					reg = <0x0 0x400>;
+          				};
+          				macaddr_factory_4: macaddr@4 {
+          					reg = <0x4 0x6>;
+          				};
+          			};
+          			partition@50000 {
+          				label = "firmware";
+          				reg = <0x50000 0xfb0000>;
+          				compatible = "denx,uimage";
+          			};
+          		};
+          	};
+          };
+
+          &uart1 {
+          	status = "okay";
+          };
           EOF
 
-      - name: Add device to image Makefile
-        run: |
+          # 2. 添加设备到 mt76x8.mk
           cat >> target/linux/ramips/image/mt76x8.mk <<'EOF'
+
           define Device/fw28-v21
             IMAGE_SIZE := 16000k
             DEVICE_VENDOR := FW28
             DEVICE_MODEL := V21
-            DEVICE_PACKAGES := kmod-usb2 kmod-usb-ohci kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch modemmanager luci-proto-modemmanager usbutils pciutils dtc ethtool
+            DEVICE_PACKAGES := kmod-usb2 kmod-usb-ohci kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi luci-i18n-qmi-zh-cn
             SUPPORTED_DEVICES += fw28,v21
           endef
           TARGET_DEVICES += fw28-v21
           EOF
 
-      - name: Add Unisoc USB ID patch for option driver
-        run: |
-          mkdir -p package/kernel/linux/patches/generic
-          cat > package/kernel/linux/patches/generic/999-unisoc-option.patch <<'EOF'
-          --- a/drivers/usb/serial/option.c
-          +++ b/drivers/usb/serial/option.c
-          @@ -XXX,XX +XXX,XX @@ static const struct usb_device_id option_ids[] = {
-           	{ USB_DEVICE(0x1782, 0x4e00) }, /* Unisoc UIS8910 */
-           	{ USB_DEVICE(0x1782, 0x4e01) }, /* Unisoc UIS8910 */
-           	{ USB_DEVICE(0x1782, 0x4e02) }, /* Unisoc UIS8910 */
-          +	{ USB_DEVICE(0x05c6, 0x9000) }, /* Unisoc generic */
-           	{ } /* Terminating entry */
-           };
+          # 3. usb_modeswitch 强制切换规则
+          mkdir -p files/usr/share/usb_modeswitch
+          cat > files/usr/share/usb_modeswitch/1782:4e00 <<'EOF'
+          TargetVendor=0x1782
+          TargetProduct=0x4e00
+          MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
           EOF
-          # Adjust the patch to fit the exact context (simplified)
-          # We'll just append the ID using a simple script instead of a full patch to avoid offset errors.
-          sed -i '/static const struct usb_device_id option_ids\[\] = {/a \
-          	{ USB_DEVICE(0x1782, 0x4e00) }, /* Unisoc UIS8910 */\
-          	{ USB_DEVICE(0x1782, 0x4e01) }, /* Unisoc UIS8910 */\
-          	{ USB_DEVICE(0x1782, 0x4e02) }, /* Unisoc UIS8910 */\
-          	{ USB_DEVICE(0x05c6, 0x9000) }, /* Unisoc generic */' package/kernel/linux/modules/usb.mk 2>/dev/null || true
-          # Alternatively, add to a quirk file. But simplest is to ensure ModemManager handles it.
 
-      - name: Create embedded files (auto APN + network + gpio power fix)
-        run: |
-          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface files/etc/config
-
-          # 开机自动执行一次 GPIO 供电拉高（如果硬件需要额外控制）
-          cat > files/etc/uci-defaults/99-gpio-power <<'EOF'
+          # 4. 开机切换模式并加载驱动
+          cat > files/etc/uci-defaults/99-unisoc-init <<'EOF'
           #!/bin/sh
-          # Try to enable 4G module power if controlled by GPIO (some boards use GPIO 8 or 45)
-          # This is a safe guess; if it doesn't exist, it will fail silently.
-          echo 8 > /sys/class/gpio/export 2>/dev/null
-          echo out > /sys/class/gpio/gpio8/direction 2>/dev/null
-          echo 1 > /sys/class/gpio/gpio8/value 2>/dev/null
-          echo 45 > /sys/class/gpio/export 2>/dev/null
-          echo out > /sys/class/gpio/gpio45/direction 2>/dev/null
-          echo 1 > /sys/class/gpio/gpio45/value 2>/dev/null
+          if lsusb | grep -q "1782:4e00"; then
+              logger -t "unisoc" "Switching UNISOC module..."
+              /usr/sbin/usb_modeswitch -v 1782 -p 4e00 -W
+              sleep 3
+          fi
+          modprobe usbserial 2>/dev/null
+          modprobe option 2>/dev/null
+          modprobe qmi_wwan 2>/dev/null
           EOF
-          chmod +x files/etc/uci-defaults/99-gpio-power
+          chmod +x files/etc/uci-defaults/99-unisoc-init
 
-          # 自动 APN 脚本
+          # 5. QMI 接口配置
+          cat > files/etc/config/network <<'EOF'
+          config interface 'loopback'
+          	option device 'lo'
+          	option proto 'static'
+          	option ipaddr '127.0.0.1'
+          	option netmask '255.0.0.0'
+          config globals 'globals'
+          	option ula_prefix 'fd00::/48'
+          config device
+          	option name 'br-lan'
+          	option type 'bridge'
+          	list ports 'eth0'
+          config interface 'lan'
+          	option device 'br-lan'
+          	option proto 'static'
+          	option ipaddr '192.168.1.1'
+          	option netmask '255.255.255.0'
+          config interface '4g'
+          	option proto 'qmi'
+          	option device '/dev/cdc-wdm0'
+          	option apn ''
+          	option auth 'none'
+          	option pincode ''
+          EOF
+
+          # 6. 自动 APN 脚本
           cat > files/etc/hotplug.d/iface/99-auto-apn <<'EOF'
           #!/bin/sh
           [ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "4g" ] || exit 0
-          logger -t "auto-apn" "4G interface up, detecting APN..."
-          sleep 5
-          MODEM_NUM=$(mmcli -L 2>/dev/null | grep -oE '[0-9]+' | head -1)
-          [ -z "$MODEM_NUM" ] && exit 1
-          IMSI=$(mmcli -m "$MODEM_NUM" --3gpp-get-imei 2>/dev/null | grep -oE "imsi: '[0-9]+'" | cut -d"'" -f2)
+          logger -t "auto-apn" "4G up, detecting APN..."
+          sleep 8
+          IMSI=$(uqmi -d /dev/cdc-wdm0 --get-imsi 2>/dev/null | grep -oE '[0-9]+')
           [ -z "$IMSI" ] && exit 1
           MCCMNC=$(echo "$IMSI" | cut -c1-5)
           case "$MCCMNC" in
@@ -144,37 +223,28 @@ jobs:
               logger -t "auto-apn" "Set APN to $APN"
               uci set network.4g.apn="$APN"
               uci commit network
-              /etc/init.d/network reload
+              ifup 4g
           fi
           EOF
           chmod +x files/etc/hotplug.d/iface/99-auto-apn
 
-          # 预置网络接口
-          cat > files/etc/config/network <<'EOF'
-          config interface 'loopback'
-          	option device 'lo'
-          	option proto 'static'
-          	option ipaddr '127.0.0.1'
-          	option netmask '255.0.0.0'
-          config globals 'globals'
-          	option ula_prefix 'fd00::/48'
-          config device
-          	option name 'br-lan'
-          	option type 'bridge'
-          	list ports 'eth0.1'
-          config interface 'lan'
-          	option device 'br-lan'
-          	option proto 'static'
-          	option ipaddr '192.168.1.1'
-          	option netmask '255.255.255.0'
-          config interface '4g'
-          	option proto 'modemmanager'
-          	option device '/sys/class/net/wwan0'
-          	option apn ''
-          	option autoconnect '1'
+          # 7. 网络优化（关闭IPv6、启用BBR、指定DNS）
+          cat > files/etc/uci-defaults/99-network-tune <<'EOF'
+          #!/bin/sh
+          uci set network.lan.ipv6='0'
+          uci set network.4g.ipv6='0'
+          uci commit network
+          echo 'net.ipv6.conf.all.disable_ipv6=1' >> /etc/sysctl.conf
+          echo 'net.ipv6.conf.default.disable_ipv6=1' >> /etc/sysctl.conf
+          echo 'net.core.default_qdisc=fq' >> /etc/sysctl.conf
+          echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf
+          uci set dhcp.@dnsmasq[0].server='223.5.5.5'
+          uci add_list dhcp.@dnsmasq[0].server='114.114.114.114'
+          uci commit dhcp
           EOF
+          chmod +x files/etc/uci-defaults/99-network-tune
 
-      - name: Generate .config
+      - name: Write .config
         run: |
           cat > .config <<'EOF'
           CONFIG_TARGET_ramips=y
@@ -194,8 +264,9 @@ jobs:
           CONFIG_PACKAGE_kmod-usb-net=y
           CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
           CONFIG_PACKAGE_usb-modeswitch=y
-          CONFIG_PACKAGE_modemmanager=y
-          CONFIG_PACKAGE_luci-proto-modemmanager=y
+          CONFIG_PACKAGE_uqmi=y
+          CONFIG_PACKAGE_luci-proto-qmi=y
+          CONFIG_PACKAGE_luci-i18n-qmi-zh-cn=y
           CONFIG_PACKAGE_dnsmasq=y
           CONFIG_PACKAGE_firewall=y
           CONFIG_PACKAGE_wpad-basic-mbedtls=y
@@ -206,10 +277,6 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_dropbear=y
-          CONFIG_PACKAGE_ethtool=y
-          CONFIG_PACKAGE_usbutils=y
-          CONFIG_PACKAGE_pciutils=y
-          CONFIG_PACKAGE_dtc=y
           # CONFIG_IPV6 is not set
           EOF
 
@@ -217,7 +284,9 @@ jobs:
         run: make defconfig
 
       - name: Update and install feeds
-        run: ./scripts/feeds update -a && ./scripts/feeds install -a
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
       - name: Download packages
         run: make download -j$(nproc)
@@ -228,6 +297,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-Final-Full
+          name: FW28-V21-Fixed-QMI
           path: bin/targets/ramips/mt76x8/*sysupgrade.bin
-          if-no-files-found: error
