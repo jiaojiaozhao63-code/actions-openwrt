@@ -1,4 +1,4 @@
-name: Build OpenWrt 23.05 for FW28-V21 (Final Complete)
+name: Build FW28-V21 QMI Final
 
 on:
   workflow_dispatch:
@@ -7,94 +7,60 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install dependencies
+      - name: Install deps
         run: |
           sudo apt update
           sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config ccache gcc-multilib g++-multilib
 
-      - name: Clone OpenWrt 23.05
-        uses: actions/checkout@v4
+      - name: Clone OpenWrt
+        uses: actions/checkout@v4.2.2
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
 
-      - name: Create custom DTS and config files
+      - name: Create directories
         run: |
           mkdir -p target/linux/ramips/dts
-          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface files/etc/config files/usr/share/usb_modeswitch
+          mkdir -p files/etc/uci-defaults
+          mkdir -p files/etc/hotplug.d/iface
+          mkdir -p files/etc/config
+          mkdir -p files/usr/share/usb_modeswitch
 
-          # 1. 精确适配的 DTS（基于真实 GPIO、分区表、交换机状态）
-          cat > target/linux/ramips/dts/mt7628an_fw28-v21.dts <<'EOF'
+      - name: Write DTS file
+        run: |
+          cat > target/linux/ramips/dts/mt7628an_fw28-v21.dts <<'DTS'
           /dts-v1/;
           #include "mt7628an.dtsi"
           #include <dt-bindings/gpio/gpio.h>
           #include <dt-bindings/input/input.h>
-
           / {
           	compatible = "fw28,v21", "mediatek,mt7628an-soc";
           	model = "FW28-V21";
-
-          	chosen {
-          		bootargs = "console=ttyS0,57600";
-          	};
-
-          	memory@0 {
-          		device_type = "memory";
-          		reg = <0x0 0x4000000>;
-          	};
-
+          	chosen { bootargs = "console=ttyS0,57600"; };
+          	memory@0 { device_type = "memory"; reg = <0x0 0x4000000>; };
           	keys {
           		compatible = "gpio-keys";
-          		reset {
-          			label = "reset";
-          			gpios = <&gpio 38 GPIO_ACTIVE_LOW>;
-          			linux,code = <KEY_RESTART>;
-          		};
+          		reset { label = "reset"; gpios = <&gpio 38 GPIO_ACTIVE_LOW>; linux,code = <KEY_RESTART>; };
           	};
-
           	leds {
           		compatible = "gpio-leds";
-          		system {
-          			label = "orange:system";
-          			gpios = <&gpio 11 GPIO_ACTIVE_LOW>;
-          		};
-          		wlan {
-          			label = "blue:wlan";
-          			gpios = <&gpio 12 GPIO_ACTIVE_LOW>;
-          		};
+          		system { label = "orange:system"; gpios = <&gpio 11 GPIO_ACTIVE_LOW>; };
+          		wlan { label = "blue:wlan"; gpios = <&gpio 12 GPIO_ACTIVE_LOW>; };
           	};
           };
-
           &ethernet {
           	nvmem-cells = <&macaddr_factory_4>;
           	nvmem-cell-names = "mac-address";
           };
-
           &esw {
           	mediatek,portmap = <0x3f>;
-          	mediatek,ephy-handle = <&ephy>;
           };
-
-          &ephy {
-          	compatible = "mediatek,mt7628-ephy", "mediatek,mtk-ephy";
-          };
-
           &wmac {
           	status = "okay";
           	mediatek,mtd-eeprom = <&factory 0x0>;
           };
-
-          &pcie {
-          	status = "okay";
-          };
-
-          &pcie0 {
-          	wifi@0,0 {
-          		compatible = "mediatek,mt76";
-          		reg = <0x0000 0 0 0 0>;
-          	};
-          };
-
+          &pcie { status = "okay"; };
+          &pcie0 { wifi@0,0 { compatible = "mediatek,mt76"; reg = <0x0000 0 0 0 0>; }; };
           &spi0 {
           	status = "okay";
           	flash@0 {
@@ -105,57 +71,26 @@ jobs:
           			compatible = "fixed-partitions";
           			#address-cells = <1>;
           			#size-cells = <1>;
-
-          			partition@0 {
-          				label = "u-boot";
-          				reg = <0x0 0x30000>;
-          				read-only;
-          			};
-
-          			partition@30000 {
-          				label = "u-boot-env";
-          				reg = <0x30000 0x1000>;
-          				read-only;
-          			};
-
-          			partition@31000 {
-          				label = "config";
-          				reg = <0x31000 0xf000>;
-          				read-only;
-          			};
-
+          			partition@0 { label = "u-boot"; reg = <0x0 0x30000>; read-only; };
+          			partition@30000 { label = "u-boot-env"; reg = <0x30000 0x1000>; read-only; };
+          			partition@31000 { label = "config"; reg = <0x31000 0xf000>; read-only; };
           			partition@40000 {
-          				label = "factory";
-          				reg = <0x40000 0x10000>;
-          				read-only;
+          				label = "factory"; reg = <0x40000 0x10000>; read-only;
           				compatible = "nvmem-cells";
-          				#address-cells = <1>;
-          				#size-cells = <1>;
-          				eeprom_factory_0: eeprom@0 {
-          					reg = <0x0 0x400>;
-          				};
-          				macaddr_factory_4: macaddr@4 {
-          					reg = <0x4 0x6>;
-          				};
+          				#address-cells = <1>; #size-cells = <1>;
+          				eeprom_factory_0: eeprom@0 { reg = <0x0 0x400>; };
+          				macaddr_factory_4: macaddr@4 { reg = <0x4 0x6>; };
           			};
-
-          			partition@50000 {
-          				label = "firmware";
-          				reg = <0x50000 0x7b0000>;
-          				compatible = "denx,uimage";
-          			};
+          			partition@50000 { label = "firmware"; reg = <0x50000 0x7b0000>; compatible = "denx,uimage"; };
           		};
           	};
           };
+          &uart1 { status = "okay"; };
+          DTS
 
-          &uart1 {
-          	status = "okay";
-          };
-          EOF
-
-          # 2. 添加设备到 mt76x8.mk
-          cat >> target/linux/ramips/image/mt76x8.mk <<'EOF'
-
+      - name: Append device to mk
+        run: |
+          cat >> target/linux/ramips/image/mt76x8.mk <<'MK'
           define Device/fw28-v21
             IMAGE_SIZE := 7872k
             DEVICE_VENDOR := FW28
@@ -164,17 +99,19 @@ jobs:
             SUPPORTED_DEVICES += fw28,v21
           endef
           TARGET_DEVICES += fw28-v21
-          EOF
+          MK
 
-          # 3. usb_modeswitch 规则（展锐模块专用）
-          cat > files/usr/share/usb_modeswitch/1782:4e00 <<'EOF'
+      - name: Write usb_modeswitch rule
+        run: |
+          cat > files/usr/share/usb_modeswitch/1782:4e00 <<'MODESWITCH'
           TargetVendor=0x1782
           TargetProduct=0x4e00
           MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
-          EOF
+          MODESWITCH
 
-          # 4. 开机切换模式并加载驱动
-          cat > files/etc/uci-defaults/99-unisoc-init <<'EOF'
+      - name: Write unisoc init script
+        run: |
+          cat > files/etc/uci-defaults/99-unisoc-init <<'INIT'
           #!/bin/sh
           if lsusb | grep -q "1782:4e00"; then
               logger -t "unisoc" "Switching UNISOC module..."
@@ -184,11 +121,12 @@ jobs:
           modprobe usbserial 2>/dev/null
           modprobe option 2>/dev/null
           modprobe qmi_wwan 2>/dev/null
-          EOF
+          INIT
           chmod +x files/etc/uci-defaults/99-unisoc-init
 
-          # 5. QMI 接口配置（APN 留空，由自动脚本填充）
-          cat > files/etc/config/network <<'EOF'
+      - name: Write network config
+        run: |
+          cat > files/etc/config/network <<'NETWORK'
           config interface 'loopback'
           	option device 'lo'
           	option proto 'static'
@@ -211,10 +149,11 @@ jobs:
           	option apn ''
           	option auth 'none'
           	option pincode ''
-          EOF
+          NETWORK
 
-          # 6. 自动 APN 脚本（基于 IMSI 识别运营商）
-          cat > files/etc/hotplug.d/iface/99-auto-apn <<'EOF'
+      - name: Write auto-apn script
+        run: |
+          cat > files/etc/hotplug.d/iface/99-auto-apn <<'APN'
           #!/bin/sh
           [ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "4g" ] || exit 0
           logger -t "auto-apn" "4G up, detecting APN..."
@@ -234,11 +173,12 @@ jobs:
               uci commit network
               ifup 4g
           fi
-          EOF
+          APN
           chmod +x files/etc/hotplug.d/iface/99-auto-apn
 
-          # 7. 网络优化（关闭IPv6、BBR、DNS）
-          cat > files/etc/uci-defaults/99-network-tune <<'EOF'
+      - name: Write network tune script
+        run: |
+          cat > files/etc/uci-defaults/99-network-tune <<'TUNE'
           #!/bin/sh
           uci set network.lan.ipv6='0'
           uci set network.4g.ipv6='0'
@@ -250,12 +190,12 @@ jobs:
           uci set dhcp.@dnsmasq[0].server='223.5.5.5'
           uci add_list dhcp.@dnsmasq[0].server='114.114.114.114'
           uci commit dhcp
-          EOF
+          TUNE
           chmod +x files/etc/uci-defaults/99-network-tune
 
       - name: Write .config
         run: |
-          cat > .config <<'EOF'
+          cat > .config <<'CONFIG'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
           CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
@@ -287,12 +227,12 @@ jobs:
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_dropbear=y
           # CONFIG_IPV6 is not set
-          EOF
+          CONFIG
 
       - name: Make defconfig
         run: make defconfig
 
-      - name: Update and install feeds
+      - name: Update feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
@@ -306,6 +246,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-Final-Complete
+          name: FW28-V21-QMI-Final
           path: bin/targets/ramips/mt76x8/*sysupgrade.bin
           if-no-files-found: error
