@@ -1,4 +1,4 @@
-name: Build OpenWrt 23.05 for MT7628 4G (Final Stable)
+name: Build OpenWrt 23.05 for MT7628 4G
 
 on:
   workflow_dispatch:
@@ -7,30 +7,25 @@ jobs:
   build:
     runs-on: ubuntu-20.04
     steps:
-      - name: 安装完整编译依赖
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config ccache gcc-multilib g++-multilib
 
-      - name: 拉取 OpenWrt 官方 23.05 源码
+      - name: Clone OpenWrt 23.05
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
           fetch-depth: 1
 
-      - name: 创建内置配置 (自动修复 + 4G 拨号)
+      - name: Create embedded config files
         run: |
           mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface
-          
-          # 1. 首次启动自动修复脚本 (PCIe + 交换机 + 网口)
+
           cat > files/etc/uci-defaults/99-auto-fix <<'EOF'
           #!/bin/sh
-          # 此脚本仅在首次启动时运行一次
-
-          logger -t "auto-fix" "Starting automatic hardware fix..."
-
-          # A. 强制启用 PCIe (为 4G 模块供电)
+          logger -t "auto-fix" "Starting hardware fix..."
           if [ ! -f /lib/firmware/pcie-okay.dtb ]; then
               cat > /tmp/pcie-fix.dts <<'DTS'
           /dts-v1/;
@@ -42,33 +37,25 @@ jobs:
               dtc -I dts -O dtb /tmp/pcie-fix.dts -o /lib/firmware/pcie-okay.dtb
               uci set system.@system[0].overlay="/lib/firmware/pcie-okay.dtb"
               uci commit system
-              logger -t "auto-fix" "PCIe overlay created. Will reboot once."
+              logger -t "auto-fix" "PCIe overlay created, rebooting..."
               reboot
               exit 0
           fi
-
-          # B. 重置交换机为全傻瓜模式 (解决网口灯闪/不通)
           swconfig dev switch0 set reset 2>/dev/null
           swconfig dev switch0 set enable_vlan 0 2>/dev/null
           swconfig dev switch0 set apply 2>/dev/null
-
-          # C. 强制 eth0 为 100M 全双工 (解决丢包 50%)
           ethtool -s eth0 speed 100 duplex full autoneg off 2>/dev/null
-
-          # D. 确保 LAN 桥接正确
           uci set network.lan.ifname='eth0'
           uci commit network
           /etc/init.d/network restart
-
           logger -t "auto-fix" "Hardware fix completed."
           EOF
           chmod +x files/etc/uci-defaults/99-auto-fix
 
-          # 2. 自动 APN 识别脚本 (4G 插卡即用)
           cat > files/etc/hotplug.d/iface/99-auto-apn <<'EOF'
           #!/bin/sh
           [ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "4g" ] || exit 0
-          logger -t "auto-apn" "4G interface up, detecting APN..."
+          logger -t "auto-apn" "4G up, detecting APN..."
           sleep 5
           MODEM_NUM=$(mmcli -L 2>/dev/null | grep -oE '[0-9]+' | head -1)
           [ -z "$MODEM_NUM" ] && exit 1
@@ -90,7 +77,6 @@ jobs:
           EOF
           chmod +x files/etc/hotplug.d/iface/99-auto-apn
 
-          # 3. 预置网络配置 (LAN + 4G)
           cat > files/etc/config/network <<'EOF'
           config interface 'loopback'
           	option device 'lo'
@@ -115,7 +101,7 @@ jobs:
           	option autoconnect '1'
           EOF
 
-      - name: 写入编译配置 (公板 + 必需软件包)
+      - name: Generate .config
         run: |
           cat > .config <<'EOF'
           CONFIG_TARGET_ramips=y
@@ -151,23 +137,23 @@ jobs:
           # CONFIG_IPV6 is not set
           EOF
 
-      - name: 生成完整配置
+      - name: Make defconfig
         run: make defconfig
 
-      - name: 更新并安装 feeds
+      - name: Update and install feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 下载所有依赖包
+      - name: Download packages
         run: make download -j$(nproc)
 
-      - name: 开始编译固件
+      - name: Build firmware
         run: make -j$(nproc) V=s
 
-      - name: 上传固件
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OpenWrt-MT7628-4G-Stable-Final
+          name: OpenWrt-MT7628-4G-PureEnglish
           path: bin/targets/ramips/mt76x8/*sysupgrade.bin
           if-no-files-found: error
