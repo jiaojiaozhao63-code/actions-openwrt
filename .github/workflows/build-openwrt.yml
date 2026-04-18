@@ -1,31 +1,74 @@
-name: Build OpenWrt 23.05 for MT7628 with 4G (FAST)
+name: Build OpenWrt 23.05 for MT7628 4G (Final Stable)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+    runs-on: ubuntu-20.04
     steps:
-      - name: 安装依赖
+      - name: 安装完整编译依赖
         run: |
           sudo apt update
-          sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib
+          sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config ccache gcc-multilib g++-multilib
 
-      - name: 拉取 OpenWrt 源码
+      - name: 拉取 OpenWrt 官方 23.05 源码
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
           fetch-depth: 1
 
-      - name: 创建配置文件
+      - name: 创建内置配置 (自动修复 + 4G 拨号)
         run: |
-          mkdir -p files/etc/hotplug.d/iface files/etc/config files/etc/uci-defaults
+          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface
+          
+          # 1. 首次启动自动修复脚本 (PCIe + 交换机 + 网口)
+          cat > files/etc/uci-defaults/99-auto-fix <<'EOF'
+          #!/bin/sh
+          # 此脚本仅在首次启动时运行一次
+
+          logger -t "auto-fix" "Starting automatic hardware fix..."
+
+          # A. 强制启用 PCIe (为 4G 模块供电)
+          if [ ! -f /lib/firmware/pcie-okay.dtb ]; then
+              cat > /tmp/pcie-fix.dts <<'DTS'
+          /dts-v1/;
+          / {
+              compatible = "mediatek,mt7628an-soc";
+              pcie { status = "okay"; };
+          };
+          DTS
+              dtc -I dts -O dtb /tmp/pcie-fix.dts -o /lib/firmware/pcie-okay.dtb
+              uci set system.@system[0].overlay="/lib/firmware/pcie-okay.dtb"
+              uci commit system
+              logger -t "auto-fix" "PCIe overlay created. Will reboot once."
+              reboot
+              exit 0
+          fi
+
+          # B. 重置交换机为全傻瓜模式 (解决网口灯闪/不通)
+          swconfig dev switch0 set reset 2>/dev/null
+          swconfig dev switch0 set enable_vlan 0 2>/dev/null
+          swconfig dev switch0 set apply 2>/dev/null
+
+          # C. 强制 eth0 为 100M 全双工 (解决丢包 50%)
+          ethtool -s eth0 speed 100 duplex full autoneg off 2>/dev/null
+
+          # D. 确保 LAN 桥接正确
+          uci set network.lan.ifname='eth0'
+          uci commit network
+          /etc/init.d/network restart
+
+          logger -t "auto-fix" "Hardware fix completed."
+          EOF
+          chmod +x files/etc/uci-defaults/99-auto-fix
+
+          # 2. 自动 APN 识别脚本 (4G 插卡即用)
           cat > files/etc/hotplug.d/iface/99-auto-apn <<'EOF'
           #!/bin/sh
           [ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "4g" ] || exit 0
+          logger -t "auto-apn" "4G interface up, detecting APN..."
           sleep 5
           MODEM_NUM=$(mmcli -L 2>/dev/null | grep -oE '[0-9]+' | head -1)
           [ -z "$MODEM_NUM" ] && exit 1
@@ -39,6 +82,7 @@ jobs:
               *)                             APN="" ;;
           esac
           if [ -n "$APN" ] && [ "$(uci -q get network.4g.apn)" != "$APN" ]; then
+              logger -t "auto-apn" "Set APN to $APN"
               uci set network.4g.apn="$APN"
               uci commit network
               /etc/init.d/network reload
@@ -46,6 +90,7 @@ jobs:
           EOF
           chmod +x files/etc/hotplug.d/iface/99-auto-apn
 
+          # 3. 预置网络配置 (LAN + 4G)
           cat > files/etc/config/network <<'EOF'
           config interface 'loopback'
           	option device 'lo'
@@ -57,7 +102,7 @@ jobs:
           config device
           	option name 'br-lan'
           	option type 'bridge'
-          	list ports 'eth0.1'
+          	list ports 'eth0'
           config interface 'lan'
           	option device 'br-lan'
           	option proto 'static'
@@ -70,25 +115,7 @@ jobs:
           	option autoconnect '1'
           EOF
 
-          cat > files/etc/uci-defaults/99-enable-pcie <<'EOF'
-          #!/bin/sh
-          if [ ! -f /lib/firmware/pcie-fix.dtb ]; then
-              cat > /tmp/pcie-fix.dts <<'DTS'
-          /dts-v1/;
-          / {
-              compatible = "mediatek,mt7628an-soc";
-              pcie { status = "okay"; };
-          };
-          DTS
-              dtc -I dts -O dtb /tmp/pcie-fix.dts -o /lib/firmware/pcie-fix.dtb
-              uci set system.@system[0].overlay="/lib/firmware/pcie-fix.dtb"
-              uci commit system
-              reboot
-          fi
-          EOF
-          chmod +x files/etc/uci-defaults/99-enable-pcie
-
-      - name: 写入配置
+      - name: 写入编译配置 (公板 + 必需软件包)
         run: |
           cat > .config <<'EOF'
           CONFIG_TARGET_ramips=y
@@ -120,25 +147,27 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_ethtool=y
           # CONFIG_IPV6 is not set
           EOF
 
-      - name: 生成配置
+      - name: 生成完整配置
         run: make defconfig
 
-      - name: 更新 feeds
+      - name: 更新并安装 feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 下载包
-        run: make download -j16
+      - name: 下载所有依赖包
+        run: make download -j$(nproc)
 
-      - name: 编译
-        run: make -j16 V=s
+      - name: 开始编译固件
+        run: make -j$(nproc) V=s
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: OpenWrt-MT7628-4G
+          name: OpenWrt-MT7628-4G-Stable-Final
           path: bin/targets/ramips/mt76x8/*sysupgrade.bin
+          if-no-files-found: error
