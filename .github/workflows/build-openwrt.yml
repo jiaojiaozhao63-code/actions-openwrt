@@ -1,4 +1,4 @@
-name: Build FW28-V21 Stable (No Custom DTS)
+name: Build FW28-V21 Factory Firmware
 
 on:
   workflow_dispatch:
@@ -13,132 +13,161 @@ jobs:
           sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config ccache gcc-multilib g++-multilib
 
       - name: Clone OpenWrt
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
 
-      - name: Prepare files
+      - name: Prepare custom files and device definition
         run: |
           mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface files/etc/config files/usr/share/usb_modeswitch
 
-          # 1. 开机启用 PCIe（通过 overlay）
-          cat > files/etc/uci-defaults/99-enable-pcie <<'EOF'
+          # 1. 加载驱动
+          cat > files/etc/uci-defaults/99-load-modules <<'EOF'
           #!/bin/sh
-          if [ ! -f /lib/firmware/pcie-okay.dtb ]; then
-              mkdir -p /etc/device-properties.d
-              echo '/dts-v1/; / { compatible = "mediatek,mt7628an-soc"; pcie { status = "okay"; }; };' > /etc/device-properties.d/pcie-fix.dts
-              dtc -I dts -O dtb /etc/device-properties.d/pcie-fix.dts -o /lib/firmware/pcie-okay.dtb
-              uci set system.@system[0].overlay="/lib/firmware/pcie-okay.dtb"
-              uci commit system
-              reboot
-          fi
+          [ -f "/etc/loaded_modules" ] && exit 0
+          modprobe usbserial
+          modprobe usbnet
+          modprobe option
+          modprobe qmi_wwan
+          touch /etc/loaded_modules
           EOF
+          chmod +x files/etc/uci-defaults/99-load-modules
 
-          # 2. 交换机修复 + 网口强制百兆
-          cat > files/etc/uci-defaults/99-switch-fix <<'EOF'
-          #!/bin/sh
-          swconfig dev switch0 set reset 2>/dev/null
-          swconfig dev switch0 set enable_vlan 0 2>/dev/null
-          swconfig dev switch0 set apply 2>/dev/null
-          ethtool -s eth0 speed 100 duplex full autoneg off 2>/dev/null
-          uci set network.lan.ifname='eth0'
-          uci commit network
-          /etc/init.d/network restart
-          EOF
-
-          # 3. 展锐模块模式切换
+          # 2. 展锐模式切换
           cat > files/etc/uci-defaults/99-unisoc-mode <<'EOF'
           #!/bin/sh
+          sleep 5
           if lsusb | grep -q "1782:4e00"; then
-              /usr/sbin/usb_modeswitch -v 1782 -p 4e00 -W
-              sleep 3
+            /usr/sbin/usb_modeswitch -v 0x1782 -p 0x4e00 -W -R
           fi
-          modprobe option 2>/dev/null
-          modprobe qmi_wwan 2>/dev/null
           EOF
+          chmod +x files/etc/uci-defaults/99-unisoc-mode
 
-          chmod +x files/etc/uci-defaults/*
-
-          # 4. usb_modeswitch 规则
+          # 3. usb_modeswitch 规则
           cat > files/usr/share/usb_modeswitch/1782:4e00 <<'MODESWITCH'
           TargetVendor=0x1782
           TargetProduct=0x4e00
           MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
           MODESWITCH
 
-          # 5. 网络配置（QMI 接口）
+          # 4. 网络配置
           cat > files/etc/config/network <<'NETWORK'
           config interface 'loopback'
-          	option device 'lo'
-          	option proto 'static'
-          	option ipaddr '127.0.0.1'
-          	option netmask '255.0.0.0'
+            option device 'lo'
+            option proto 'static'
+            option ipaddr '127.0.0.1'
+            option netmask '255.0.0.0'
+
           config globals 'globals'
-          	option ula_prefix 'fd00::/48'
+            option ula_prefix 'fd00::/48'
+
           config device
-          	option name 'br-lan'
-          	option type 'bridge'
-          	list ports 'eth0'
+            option name 'br-lan'
+            option type 'bridge'
+            list ports 'eth0'
+
           config interface 'lan'
-          	option device 'br-lan'
-          	option proto 'static'
-          	option ipaddr '192.168.1.1'
-          	option netmask '255.255.255.0'
+            option device 'br-lan'
+            option proto 'static'
+            option ipaddr '192.168.1.1'
+            option netmask '255.255.255.0'
+            option ip6assign 'none'
+
           config interface '4g'
-          	option proto 'qmi'
-          	option device '/dev/cdc-wdm0'
-          	option apn ''
-          	option auth 'none'
-          	option pincode ''
+            option proto 'qmi'
+            option device '/dev/cdc-wdm0'
+            option apn 'cmnet'
+            option auth 'none'
+            option ipv6 '0'
           NETWORK
 
-          # 6. 自动 APN 脚本
+          # 5. 无线
+          cat > files/etc/config/wireless <<'WIRELESS'
+          config wifi-device 'radio0'
+            option type 'mac80211'
+            option band '2g'
+            option channel '6'
+            option htmode 'HT20'
+            option country 'CN'
+            option disabled '0'
+
+          config wifi-iface 'default_radio0'
+            option device 'radio0'
+            option network 'lan'
+            option mode 'ap'
+            option ssid 'FW28-V21'
+            option encryption 'none'
+          WIRELESS
+
+          # 6. 自动APN
           cat > files/etc/hotplug.d/iface/99-auto-apn <<'APN'
           #!/bin/sh
-          [ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "4g" ] || exit 0
-          logger -t "auto-apn" "4G up, detecting APN..."
-          sleep 8
-          IMSI=$(uqmi -d /dev/cdc-wdm0 --get-imsi 2>/dev/null | grep -oE '[0-9]+')
+          [ "$ACTION" = "ifup" ] || exit 0
+          [ "$INTERFACE" = "4g" ] || exit 0
+          
+          sleep 10
+          IMSI=$(uqmi -d /dev/cdc-wdm0 --get-imsi 2>/dev/null | grep -o '[0-9]\+')
           [ -z "$IMSI" ] && exit 1
+          
           MCCMNC=$(echo "$IMSI" | cut -c1-5)
           case "$MCCMNC" in
-              46000|46002|46004|46007|46008) APN="cmnet" ;;
-              46001|46006|46009)             APN="3gnet" ;;
-              46003|46005|46011)             APN="ctnet" ;;
-              *)                             APN="" ;;
+            46000|46002|46004|46007|46008) APN="cmnet" ;;
+            46001|46006|46009)             APN="3gnet" ;;
+            46003|46005|46011)             APN="ctnet" ;;
+            *)                             exit 0 ;;
           esac
-          if [ -n "$APN" ] && [ "$(uci -q get network.4g.apn)" != "$APN" ]; then
-              logger -t "auto-apn" "Set APN to $APN"
-              uci set network.4g.apn="$APN"
-              uci commit network
-              ifup 4g
-          fi
+          
+          uci set network.4g.apn="$APN"
+          uci commit network
           APN
           chmod +x files/etc/hotplug.d/iface/99-auto-apn
 
-          # 7. 网络优化（关闭 IPv6、BBR、DNS）
-          cat > files/etc/uci-defaults/99-network-tune <<'TUNE'
+          # 7. 系统优化
+          cat > files/etc/uci-defaults/99-system-tune <<'TUNE'
           #!/bin/sh
-          uci set network.lan.ipv6='0'
-          uci set network.4g.ipv6='0'
-          uci commit network
-          echo 'net.ipv6.conf.all.disable_ipv6=1' >> /etc/sysctl.conf
-          echo 'net.ipv6.conf.default.disable_ipv6=1' >> /etc/sysctl.conf
-          echo 'net.core.default_qdisc=fq' >> /etc/sysctl.conf
-          echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf
+          [ -f "/etc/tuned_done" ] && exit 0
+          
+          uci set dhcp.lan.ra='disabled'
+          uci set dhcp.lan.dhcpv6='disabled'
+          uci commit dhcp
+          
           uci set dhcp.@dnsmasq[0].server='223.5.5.5'
           uci add_list dhcp.@dnsmasq[0].server='114.114.114.114'
           uci commit dhcp
+          
+          sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+          sed -i '/tcp_congestion_control/d' /etc/sysctl.conf
+          
+          echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+          echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+          
+          touch /etc/tuned_done
           TUNE
-          chmod +x files/etc/uci-defaults/99-network-tune
+          chmod +x files/etc/uci-defaults/99-system-tune
+
+          # 8. 设备定义（完整无缺）
+          cat >> target/linux/ramips/image/mt76x8.mk <<'MK'
+          define Device/fw28-v21
+            DEVICE_VENDOR := FW28
+            DEVICE_MODEL := V21
+            DEVICE_PACKAGES := kmod-usb2 kmod-usb-ohci kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi luci-i18n-qmi-zh-cn ethtool
+            KERNEL_LOADADDR := 0x80000000
+            KERNEL_INITRAMFS :=
+            IMAGE_SIZE := 7872k
+            IMAGES += factory.bin
+            IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 7872k | append-metadata
+            SUPPORTED_DEVICES += fw28,v21
+          endef
+          TARGET_DEVICES += fw28-v21
+          MK
 
       - name: Write .config
         run: |
           cat > .config <<'CONFIG'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
-          CONFIG_TARGET_ramips_mt76x8_DEVICE_mediatek_mt7628an-eval-board=y
+          CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
           CONFIG_TARGET_OPTIMIZATION="-Os -pipe"
           CONFIG_SMALL_FLASH=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
@@ -187,6 +216,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-Stable
-          path: bin/targets/ramips/mt76x8/*sysupgrade.bin
+          name: FW28-V21-Factory
+          path: bin/targets/ramips/mt76x8/*factory.bin
           if-no-files-found: error
