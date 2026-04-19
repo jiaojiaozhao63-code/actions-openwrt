@@ -1,4 +1,4 @@
-name: Build FW28-V21 QMI Final
+name: Build FW28-V21 Stable (No Custom DTS)
 
 on:
   workflow_dispatch:
@@ -18,114 +18,56 @@ jobs:
           repository: openwrt/openwrt
           ref: openwrt-23.05
 
-      - name: Create directories
+      - name: Prepare files
         run: |
-          mkdir -p target/linux/ramips/dts
-          mkdir -p files/etc/uci-defaults
-          mkdir -p files/etc/hotplug.d/iface
-          mkdir -p files/etc/config
-          mkdir -p files/usr/share/usb_modeswitch
+          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface files/etc/config files/usr/share/usb_modeswitch
 
-      - name: Write DTS file
-        run: |
-          cat > target/linux/ramips/dts/mt7628an_fw28-v21.dts <<'DTS'
-          /dts-v1/;
-          #include "mt7628an.dtsi"
-          #include <dt-bindings/gpio/gpio.h>
-          #include <dt-bindings/input/input.h>
-          / {
-          	compatible = "fw28,v21", "mediatek,mt7628an-soc";
-          	model = "FW28-V21";
-          	chosen { bootargs = "console=ttyS0,57600"; };
-          	memory@0 { device_type = "memory"; reg = <0x0 0x4000000>; };
-          	keys {
-          		compatible = "gpio-keys";
-          		reset { label = "reset"; gpios = <&gpio 38 GPIO_ACTIVE_LOW>; linux,code = <KEY_RESTART>; };
-          	};
-          	leds {
-          		compatible = "gpio-leds";
-          		system { label = "orange:system"; gpios = <&gpio 11 GPIO_ACTIVE_LOW>; };
-          		wlan { label = "blue:wlan"; gpios = <&gpio 12 GPIO_ACTIVE_LOW>; };
-          	};
-          };
-          &ethernet {
-          	nvmem-cells = <&macaddr_factory_4>;
-          	nvmem-cell-names = "mac-address";
-          };
-          &esw {
-          	mediatek,portmap = <0x3f>;
-          };
-          &wmac {
-          	status = "okay";
-          	mediatek,mtd-eeprom = <&factory 0x0>;
-          };
-          &pcie { status = "okay"; };
-          &pcie0 { wifi@0,0 { compatible = "mediatek,mt76"; reg = <0x0000 0 0 0 0>; }; };
-          &spi0 {
-          	status = "okay";
-          	flash@0 {
-          		compatible = "jedec,spi-nor";
-          		reg = <0>;
-          		spi-max-frequency = <40000000>;
-          		partitions {
-          			compatible = "fixed-partitions";
-          			#address-cells = <1>;
-          			#size-cells = <1>;
-          			partition@0 { label = "u-boot"; reg = <0x0 0x30000>; read-only; };
-          			partition@30000 { label = "u-boot-env"; reg = <0x30000 0x1000>; read-only; };
-          			partition@31000 { label = "config"; reg = <0x31000 0xf000>; read-only; };
-          			partition@40000 {
-          				label = "factory"; reg = <0x40000 0x10000>; read-only;
-          				compatible = "nvmem-cells";
-          				#address-cells = <1>; #size-cells = <1>;
-          				eeprom_factory_0: eeprom@0 { reg = <0x0 0x400>; };
-          				macaddr_factory_4: macaddr@4 { reg = <0x4 0x6>; };
-          			};
-          			partition@50000 { label = "firmware"; reg = <0x50000 0x7b0000>; compatible = "denx,uimage"; };
-          		};
-          	};
-          };
-          &uart1 { status = "okay"; };
-          DTS
+          # 1. 开机启用 PCIe（通过 overlay）
+          cat > files/etc/uci-defaults/99-enable-pcie <<'EOF'
+          #!/bin/sh
+          if [ ! -f /lib/firmware/pcie-okay.dtb ]; then
+              mkdir -p /etc/device-properties.d
+              echo '/dts-v1/; / { compatible = "mediatek,mt7628an-soc"; pcie { status = "okay"; }; };' > /etc/device-properties.d/pcie-fix.dts
+              dtc -I dts -O dtb /etc/device-properties.d/pcie-fix.dts -o /lib/firmware/pcie-okay.dtb
+              uci set system.@system[0].overlay="/lib/firmware/pcie-okay.dtb"
+              uci commit system
+              reboot
+          fi
+          EOF
 
-      - name: Append device to mk
-        run: |
-          cat >> target/linux/ramips/image/mt76x8.mk <<'MK'
-          define Device/fw28-v21
-            IMAGE_SIZE := 7872k
-            DEVICE_VENDOR := FW28
-            DEVICE_MODEL := V21
-            DEVICE_PACKAGES := kmod-usb2 kmod-usb-ohci kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi luci-i18n-qmi-zh-cn
-            SUPPORTED_DEVICES += fw28,v21
-          endef
-          TARGET_DEVICES += fw28-v21
-          MK
+          # 2. 交换机修复 + 网口强制百兆
+          cat > files/etc/uci-defaults/99-switch-fix <<'EOF'
+          #!/bin/sh
+          swconfig dev switch0 set reset 2>/dev/null
+          swconfig dev switch0 set enable_vlan 0 2>/dev/null
+          swconfig dev switch0 set apply 2>/dev/null
+          ethtool -s eth0 speed 100 duplex full autoneg off 2>/dev/null
+          uci set network.lan.ifname='eth0'
+          uci commit network
+          /etc/init.d/network restart
+          EOF
 
-      - name: Write usb_modeswitch rule
-        run: |
+          # 3. 展锐模块模式切换
+          cat > files/etc/uci-defaults/99-unisoc-mode <<'EOF'
+          #!/bin/sh
+          if lsusb | grep -q "1782:4e00"; then
+              /usr/sbin/usb_modeswitch -v 1782 -p 4e00 -W
+              sleep 3
+          fi
+          modprobe option 2>/dev/null
+          modprobe qmi_wwan 2>/dev/null
+          EOF
+
+          chmod +x files/etc/uci-defaults/*
+
+          # 4. usb_modeswitch 规则
           cat > files/usr/share/usb_modeswitch/1782:4e00 <<'MODESWITCH'
           TargetVendor=0x1782
           TargetProduct=0x4e00
           MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
           MODESWITCH
 
-      - name: Write unisoc init script
-        run: |
-          cat > files/etc/uci-defaults/99-unisoc-init <<'INIT'
-          #!/bin/sh
-          if lsusb | grep -q "1782:4e00"; then
-              logger -t "unisoc" "Switching UNISOC module..."
-              /usr/sbin/usb_modeswitch -v 1782 -p 4e00 -W
-              sleep 3
-          fi
-          modprobe usbserial 2>/dev/null
-          modprobe option 2>/dev/null
-          modprobe qmi_wwan 2>/dev/null
-          INIT
-          chmod +x files/etc/uci-defaults/99-unisoc-init
-
-      - name: Write network config
-        run: |
+          # 5. 网络配置（QMI 接口）
           cat > files/etc/config/network <<'NETWORK'
           config interface 'loopback'
           	option device 'lo'
@@ -151,8 +93,7 @@ jobs:
           	option pincode ''
           NETWORK
 
-      - name: Write auto-apn script
-        run: |
+          # 6. 自动 APN 脚本
           cat > files/etc/hotplug.d/iface/99-auto-apn <<'APN'
           #!/bin/sh
           [ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "4g" ] || exit 0
@@ -176,8 +117,7 @@ jobs:
           APN
           chmod +x files/etc/hotplug.d/iface/99-auto-apn
 
-      - name: Write network tune script
-        run: |
+          # 7. 网络优化（关闭 IPv6、BBR、DNS）
           cat > files/etc/uci-defaults/99-network-tune <<'TUNE'
           #!/bin/sh
           uci set network.lan.ipv6='0'
@@ -198,7 +138,7 @@ jobs:
           cat > .config <<'CONFIG'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
-          CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
+          CONFIG_TARGET_ramips_mt76x8_DEVICE_mediatek_mt7628an-eval-board=y
           CONFIG_TARGET_OPTIMIZATION="-Os -pipe"
           CONFIG_SMALL_FLASH=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
@@ -226,6 +166,7 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_ethtool=y
           # CONFIG_IPV6 is not set
           CONFIG
 
@@ -246,6 +187,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-QMI-Final
+          name: FW28-V21-Stable
           path: bin/targets/ramips/mt76x8/*sysupgrade.bin
           if-no-files-found: error
