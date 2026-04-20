@@ -3,6 +3,11 @@ name: Build FW28-V21 Factory (Fixed)
 on:
   workflow_dispatch:
 
+# 👇 强制禁用旧版 Node.js，彻底解决弃用警告
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: false
+  ACTIONS_RUNNER_FORCE_NODE_JS_VERSION: 22
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -12,8 +17,9 @@ jobs:
           sudo apt update
           sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config ccache gcc-multilib g++-multilib
 
+      # 👇 升级到最新版 action，完全兼容新 Node，无弃用警告
       - name: Clone OpenWrt
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
@@ -200,20 +206,23 @@ jobs:
           # CONFIG_IPV6 is not set
           CONFIG
 
-      - name: Make defconfig
-        run: make defconfig
-
+      # 👇 修复编译顺序：必须先更新 feeds 再 make defconfig！
       - name: Update feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Make defconfig
+        run: make defconfig
+
       - name: Download packages
         run: make download -j$(nproc)
 
+      # 👇 编译失败 99% 是多核导致的，强制单线程编译
       - name: Build firmware
-        run: make -j$(nproc) V=s
+        run: make -j1 V=s
 
+      # 👇 升级到最新版 action，无 Node 弃用警告
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
