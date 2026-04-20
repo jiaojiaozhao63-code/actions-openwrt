@@ -1,85 +1,46 @@
-name: Build FW28-V21 Factory (Fixed)
+name: Build FW28-V21 Minimal (No Fail)
 
 on:
   workflow_dispatch:
-
-# 👇 强制让所有 Action 跑在 Node.js 24，彻底消除弃用警告
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: false
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install dependencies
+      - name: Install deps
         run: |
           sudo apt update
-          sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config ccache gcc-multilib g++-multilib
+          sudo apt install -y --no-install-recommends build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib
 
-      # 👇 用最新版 checkout，完全兼容 Node 24，无弃用警告
       - name: Clone OpenWrt
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
+          depth: 1
 
-      - name: Prepare custom files
+      - name: Prepare files
         run: |
-          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface files/etc/config files/usr/share/usb_modeswitch
-
-          # 1. 加载驱动
-          cat > files/etc/uci-defaults/99-load-modules <<'EOF'
-          #!/bin/sh
-          [ -f "/etc/loaded_modules" ] && exit 0
-          modprobe usbserial
-          modprobe usbnet
-          modprobe option
-          modprobe qmi_wwan
-          touch /etc/loaded_modules
-          EOF
-          chmod +x files/etc/uci-defaults/99-load-modules
-
-          # 2. 展锐模式切换
-          cat > files/etc/uci-defaults/99-unisoc-mode <<'EOF'
-          #!/bin/sh
-          sleep 5
-          if lsusb | grep -q "1782:4e00"; then
-            /usr/sbin/usb_modeswitch -v 0x1782 -p 0x4e00 -W -R
-          fi
-          EOF
-          chmod +x files/etc/uci-defaults/99-unisoc-mode
-
-          # 3. usb_modeswitch 规则
-          cat > files/usr/share/usb_modeswitch/1782:4e00 <<'MODESWITCH'
-          TargetVendor=0x1782
-          TargetProduct=0x4e00
-          MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
-          MODESWITCH
-
-          # 4. 网络配置
+          mkdir -p files/etc/config files/etc/uci-defaults
+          # 网络配置
           cat > files/etc/config/network <<'NETWORK'
           config interface 'loopback'
             option device 'lo'
             option proto 'static'
             option ipaddr '127.0.0.1'
             option netmask '255.0.0.0'
-
           config globals 'globals'
             option ula_prefix 'fd00::/48'
-
           config device
             option name 'br-lan'
             option type 'bridge'
             list ports 'eth0'
-
           config interface 'lan'
             option device 'br-lan'
             option proto 'static'
             option ipaddr '192.168.1.1'
             option netmask '255.255.255.0'
             option ip6assign 'none'
-
           config interface '4g'
             option proto 'qmi'
             option device '/dev/cdc-wdm0'
@@ -87,80 +48,24 @@ jobs:
             option auth 'none'
             option ipv6 '0'
           NETWORK
-
-          # 5. 无线
-          cat > files/etc/config/wireless <<'WIRELESS'
-          config wifi-device 'radio0'
-            option type 'mac80211'
-            option band '2g'
-            option channel '6'
-            option htmode 'HT20'
-            option country 'CN'
-            option disabled '0'
-
-          config wifi-iface 'default_radio0'
-            option device 'radio0'
-            option network 'lan'
-            option mode 'ap'
-            option ssid 'FW28-V21'
-            option encryption 'none'
-          WIRELESS
-
-          # 6. 自动APN
-          cat > files/etc/hotplug.d/iface/99-auto-apn <<'APN'
+          # 驱动加载
+          cat > files/etc/uci-defaults/99-load <<'EOF'
           #!/bin/sh
-          [ "$ACTION" = "ifup" ] || exit 0
-          [ "$INTERFACE" = "4g" ] || exit 0
-          
-          sleep 10
-          IMSI=$(uqmi -d /dev/cdc-wdm0 --get-imsi 2>/dev/null | grep -o '[0-9]\+')
-          [ -z "$IMSI" ] && exit 1
-          
-          MCCMNC=$(echo "$IMSI" | cut -c1-5)
-          case "$MCCMNC" in
-            46000|46002|46004|46007|46008) APN="cmnet" ;;
-            46001|46006|46009)             APN="3gnet" ;;
-            46003|46005|46011)             APN="ctnet" ;;
-            *)                             exit 0 ;;
-          esac
-          
-          uci set network.4g.apn="$APN"
-          uci commit network
-          APN
-          chmod +x files/etc/hotplug.d/iface/99-auto-apn
+          modprobe usbserial
+          modprobe usbnet
+          modprobe option
+          modprobe qmi_wwan
+          EOF
+          chmod +x files/etc/uci-defaults/99-load
 
-          # 7. 系统优化
-          cat > files/etc/uci-defaults/99-system-tune <<'TUNE'
-          #!/bin/sh
-          [ -f "/etc/tuned_done" ] && exit 0
-          
-          uci set dhcp.lan.ra='disabled'
-          uci set dhcp.lan.dhcpv6='disabled'
-          uci commit dhcp
-          
-          uci set dhcp.@dnsmasq[0].server='223.5.5.5'
-          uci add_list dhcp.@dnsmasq[0].server='114.114.114.114'
-          uci commit dhcp
-          
-          sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-          sed -i '/tcp_congestion_control/d' /etc/sysctl.conf
-          
-          echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-          echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-          
-          touch /etc/tuned_done
-          TUNE
-          chmod +x files/etc/uci-defaults/99-system-tune
-
-      - name: Add device definition
+      - name: Add device
         run: |
           cat >> target/linux/ramips/image/mt76x8.mk <<'MK'
           define Device/fw28-v21
             DEVICE_VENDOR := FW28
             DEVICE_MODEL := V21
-            DEVICE_PACKAGES := kmod-usb2 kmod-usb-ohci kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi luci-i18n-qmi-zh-cn ethtool
+            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi
             KERNEL_LOADADDR := 0x80000000
-            KERNEL_INITRAMFS :=
             IMAGE_SIZE := 7872k
             IMAGES += factory.bin
             IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 7872k | append-metadata
@@ -175,57 +80,43 @@ jobs:
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
           CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
-          CONFIG_TARGET_OPTIMIZATION="-Os -pipe"
           CONFIG_SMALL_FLASH=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
-          CONFIG_TARGET_KERNEL_PARTSIZE=2048
-          CONFIG_TARGET_ROOTFS_PARTSIZE=9728
           CONFIG_PACKAGE_kmod-mt76x8=y
           CONFIG_PACKAGE_kmod-usb-core=y
           CONFIG_PACKAGE_kmod-usb2=y
-          CONFIG_PACKAGE_kmod-usb-ohci=y
           CONFIG_PACKAGE_kmod-usb-serial=y
           CONFIG_PACKAGE_kmod-usb-serial-option=y
           CONFIG_PACKAGE_kmod-usb-net=y
           CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
           CONFIG_PACKAGE_usb-modeswitch=y
           CONFIG_PACKAGE_uqmi=y
+          CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-proto-qmi=y
-          CONFIG_PACKAGE_luci-i18n-qmi-zh-cn=y
           CONFIG_PACKAGE_dnsmasq=y
           CONFIG_PACKAGE_firewall=y
-          CONFIG_PACKAGE_wpad-basic-mbedtls=y
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-base=y
-          CONFIG_PACKAGE_luci-mod-network=y
-          CONFIG_PACKAGE_luci-theme-bootstrap=y
-          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_dropbear=y
-          CONFIG_PACKAGE_ethtool=y
           # CONFIG_IPV6 is not set
           CONFIG
 
-      # 👇 关键修复：先更新 feeds 再 make defconfig，否则依赖找不到直接报错
-      - name: Update feeds
+      - name: Feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Make defconfig
+      - name: Defconfig
         run: make defconfig
 
-      - name: Download packages
-        run: make download -j4
+      - name: Download
+        run: make download -j2
 
-      # 👇 关键修复：GitHub Actions 多核编译容易炸，强制单线程编译
-      - name: Build firmware
-        run: make -j1 V=s
+      - name: Build
+        run: make -j1
 
-      # 👇 用最新版 upload-artifact，无弃用警告
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-Factory-Fixed
+          name: FW28-V21-Minimal
           path: bin/targets/ramips/mt76x8/*factory.bin
           if-no-files-found: error
