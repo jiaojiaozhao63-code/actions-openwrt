@@ -1,4 +1,4 @@
-name: Build FW28-V21 Minimal (No Fail)
+name: FW28-V21 UNISOC 4G 最终完整版 (自启/顺序正确/无IPv6/BBR)
 
 on:
   workflow_dispatch:
@@ -10,77 +10,198 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install dependencies
+      - name: 安装编译依赖
         run: |
           sudo apt update
-          sudo apt install -y --no-install-recommends build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib
+          sudo apt install -y --no-install-recommends \
+            build-essential libncurses-dev git python3 unzip wget gawk flex bison \
+            libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev \
+            libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib
 
-      - name: Clone OpenWrt
+      - name: 克隆 OpenWrt 23.05
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
           fetch-depth: 1
 
-      - name: Prepare custom files
+      - name: 写入定制文件（含开机自启，无 lsusb 依赖）
         run: |
-          mkdir -p files/etc/config files/etc/uci-defaults
+          mkdir -p files/etc/config \
+                   files/etc/usb_modeswitch.d \
+                   files/etc/init.d \
+                   files/etc/sysctl.d \
+                   files/etc/rc.d
+
+          # ------------------------------------------------------------
+          # 1. 网络配置：纯 IPv4，QMI P2P，增加 delay 等待设备
+          # ------------------------------------------------------------
           cat > files/etc/config/network <<'NETWORK'
           config interface 'loopback'
             option device 'lo'
             option proto 'static'
             option ipaddr '127.0.0.1'
             option netmask '255.0.0.0'
-          config globals 'globals'
-            option ula_prefix 'fd00::/48'
+
           config device
             option name 'br-lan'
             option type 'bridge'
             list ports 'eth0'
+
           config interface 'lan'
             option device 'br-lan'
             option proto 'static'
             option ipaddr '192.168.1.1'
             option netmask '255.255.255.0'
-            option ip6assign 'none'
+
           config interface '4g'
             option proto 'qmi'
             option device '/dev/cdc-wdm0'
             option apn 'cmnet'
             option auth 'none'
             option ipv6 '0'
+            option pdptype 'ipv4'
+            option delay '10'
+            option metric '10'
           NETWORK
-          cat > files/etc/uci-defaults/99-load <<'EOF'
-          #!/bin/sh
-          modprobe usbserial
-          modprobe usbnet
-          modprobe option
-          modprobe qmi_wwan
-          EOF
-          chmod +x files/etc/uci-defaults/99-load
 
-      - name: Add device definition
+          # ------------------------------------------------------------
+          # 2. WiFi 配置：自动检测硬件，固定信道6 HT20，最大功率
+          # ------------------------------------------------------------
+          cat > files/etc/config/wireless <<'WIFI'
+          config wifi-device 'radio0'
+            option type 'mac80211'
+            option band '2g'
+            option channel '6'
+            option htmode 'HT20'
+            option txpower '20'
+            option country 'CN'
+            option disabled '0'
+
+          config wifi-iface 'default_radio0'
+            option device 'radio0'
+            option network 'lan'
+            option mode 'ap'
+            option ssid 'FW28-V21'
+            option encryption 'psk2'
+            option key '12345678'
+          WIFI
+
+          # ------------------------------------------------------------
+          # 3. 展锐专用 usb-modeswitch 规则（无多余参数）
+          #    注意：请根据你实际 lsusb 的 VID:PID 修改文件名和内容
+          # ------------------------------------------------------------
+          cat > files/etc/usb_modeswitch.d/1782:4d15 <<'MODE'
+          DefaultVendor=0x1782
+          DefaultProduct=0x4d15
+          TargetClass=0xff
+          MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
+          MODE
+
+          # ------------------------------------------------------------
+          # 4. init.d 脚本：严格顺序（先切模式，再加载驱动）
+          #    不依赖 lsusb，直接等待 /dev/cdc-wdm0 出现
+          # ------------------------------------------------------------
+          cat > files/etc/init.d/4g-modem <<'INIT'
+          #!/bin/sh /etc/rc.common
+          START=35
+          USE_PROCD=1
+
+          start_service() {
+              # 第一步：切换 U盘模式 → 上网模式
+              /usr/sbin/usb_modeswitch -c /etc/usb_modeswitch.d/1782:4d15 2>/dev/null
+              sleep 3
+
+              # 第二步：按顺序加载驱动（usbserial → option → qmi_wwan）
+              modprobe usbserial 2>/dev/null
+              modprobe option 2>/dev/null
+              modprobe qmi_wwan 2>/dev/null
+              sleep 2
+
+              # 第三步：等待 cdc-wdm0 设备节点出现（最多等10秒）
+              for i in 1 2 3 4 5 6 7 8 9 10; do
+                  [ -e /dev/cdc-wdm0 ] && break
+                  sleep 1
+              done
+          }
+          INIT
+          chmod +x files/etc/init.d/4g-modem
+
+          # ------------------------------------------------------------
+          # 5. 启用开机自启（创建符号链接到 rc.d）
+          # ------------------------------------------------------------
+          ln -sf ../init.d/4g-modem files/etc/rc.d/S354g-modem
+
+          # ------------------------------------------------------------
+          # 6. 开启 BBR 拥塞控制（海边弱信号优化）
+          # ------------------------------------------------------------
+          cat > files/etc/sysctl.d/10-bbr.conf <<'BBR'
+          net.core.default_qdisc = fq
+          net.ipv4.tcp_congestion_control = bbr
+          BBR
+
+          # ------------------------------------------------------------
+          # 7. 彻底关闭 IPv6（内核+系统）
+          # ------------------------------------------------------------
+          cat > files/etc/sysctl.d/01-disable-ipv6.conf <<'IP6'
+          net.ipv6.conf.all.disable_ipv6 = 1
+          net.ipv6.conf.default.disable_ipv6 = 1
+          net.ipv6.conf.lo.disable_ipv6 = 1
+          IP6
+
+          # ------------------------------------------------------------
+          # 8. DNS 优化（阿里 + 114，避免运营商 DNS 丢包）
+          # ------------------------------------------------------------
+          cat > files/etc/config/dhcp <<'DHCP'
+          config dnsmasq
+            option domainneeded '1'
+            option boguspriv '1'
+            option filterwin2k '0'
+            option localise_queries '1'
+            option rebind_protection '1'
+            option rebind_localhost '1'
+            option local '/lan/'
+            option domain 'lan'
+            option expandhosts '1'
+            option nonegcache '0'
+            option authoritative '1'
+            option readethers '1'
+            option leasefile '/tmp/dhcp.leases'
+            option noresolv '1'
+            list server '223.5.5.5'
+            list server '114.114.114.114'
+
+          config dhcp 'lan'
+            option interface 'lan'
+            option start '100'
+            option limit '150'
+            option leasetime '12h'
+          DHCP
+
+      - name: 安全添加设备定义（不破坏原文件）
         run: |
-          printf '\n%s\n' \
-            "define Device/fw28-v21" \
-            "  DEVICE_VENDOR := FW28" \
-            "  DEVICE_MODEL := V21" \
-            "  DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi" \
-            "  KERNEL_LOADADDR := 0x80000000" \
-            "  IMAGE_SIZE := 7872k" \
-            "  IMAGES += factory.bin" \
-            "  IMAGE/factory.bin := \$$(sysupgrade_bin) | pad-to 7872k | append-metadata" \
-            "  SUPPORTED_DEVICES += fw28,v21" \
-            "endef" \
-            "TARGET_DEVICES += fw28-v21" \
-            >> target/linux/ramips/image/mt76x8.mk
+          grep -q "fw28-v21" target/linux/ramips/image/mt76x8.mk || {
+            cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
+          define Device/fw28-v21
+            DEVICE_VENDOR := FW28
+            DEVICE_MODEL := V21
+            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi kmod-tcp-bbr
+            KERNEL_LOADADDR := 0x80000000
+            IMAGE_SIZE := 7872k
+            IMAGES += factory.bin
+            IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 7872k | append-metadata
+            SUPPORTED_DEVICES += fw28,v21
+          endef
+          TARGET_DEVICES += fw28-v21
+          DEV
+          }
 
-      - name: Update feeds
+      - name: 更新 feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Create base .config
+      - name: 生成 .config（无 IPv6，包含所有必要软件包）
         run: |
           cat > .config <<'CONFIG'
           CONFIG_TARGET_ramips=y
@@ -99,42 +220,44 @@ jobs:
           CONFIG_PACKAGE_uqmi=y
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-proto-qmi=y
+          CONFIG_PACKAGE_kmod-tcp-bbr=y
           CONFIG_PACKAGE_dnsmasq=y
           CONFIG_PACKAGE_firewall=y
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_dropbear=y
           # CONFIG_IPV6 is not set
+          CONFIG_KERNEL_IPV6=n
           CONFIG
 
-      - name: Expand config
+      - name: 扩展配置
         run: |
           export TERM=dumb
           make olddefconfig
 
-      - name: Download all sources
+      - name: 下载所有源码
         run: make download -j$(nproc)
 
-      - name: Build firmware
+      - name: 编译固件
         run: make -j$(nproc) V=s
 
-      - name: Check firmware size
+      - name: 检查固件大小
         run: |
           max_size=$((7872*1024))
           fw_file=$(ls bin/targets/ramips/mt76x8/*factory.bin 2>/dev/null | head -1)
           if [ -z "$fw_file" ]; then
-            echo "ERROR: No factory.bin file generated!"
+            echo "错误：未生成 factory.bin"
             exit 1
           fi
           actual_size=$(stat -c%s "$fw_file")
           if [ $actual_size -gt $max_size ]; then
-            echo "ERROR: Firmware too large! ($actual_size > $max_size)"
+            echo "错误：固件过大 ($actual_size > $max_size)"
             exit 1
           fi
-          echo "✅ Firmware size OK: $actual_size bytes"
+          echo "✅ 固件大小正常：$actual_size 字节"
 
-      - name: Upload artifact
+      - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-Minimal
+          name: FW28-V21-FINAL-AUTO-START
           path: bin/targets/ramips/mt76x8/*factory.bin
           if-no-files-found: error
