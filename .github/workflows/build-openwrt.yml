@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install deps
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y --no-install-recommends build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib
@@ -19,10 +19,9 @@ jobs:
           ref: openwrt-23.05
           depth: 1
 
-      - name: Prepare files
+      - name: Prepare custom files
         run: |
           mkdir -p files/etc/config files/etc/uci-defaults
-          # 网络配置
           cat > files/etc/config/network <<'NETWORK'
           config interface 'loopback'
             option device 'lo'
@@ -48,7 +47,6 @@ jobs:
             option auth 'none'
             option ipv6 '0'
           NETWORK
-          # 驱动加载
           cat > files/etc/uci-defaults/99-load <<'EOF'
           #!/bin/sh
           modprobe usbserial
@@ -58,24 +56,31 @@ jobs:
           EOF
           chmod +x files/etc/uci-defaults/99-load
 
-      - name: Add device
+      - name: Add device definition
         run: |
-          cat >> target/linux/ramips/image/mt76x8.mk <<'MK'
-          define Device/fw28-v21
-            DEVICE_VENDOR := FW28
-            DEVICE_MODEL := V21
-            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi
-            KERNEL_LOADADDR := 0x80000000
-            IMAGE_SIZE := 7872k
-            IMAGES += factory.bin
-            IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 7872k | append-metadata
-            SUPPORTED_DEVICES += fw28,v21
-          endef
-          TARGET_DEVICES += fw28-v21
-          MK
+          # 确保文件末尾有换行符，并正确追加
+          printf '\n%s\n' \
+            "define Device/fw28-v21" \
+            "  DEVICE_VENDOR := FW28" \
+            "  DEVICE_MODEL := V21" \
+            "  DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi" \
+            "  KERNEL_LOADADDR := 0x80000000" \
+            "  IMAGE_SIZE := 7872k" \
+            "  IMAGES += factory.bin" \
+            "  IMAGE/factory.bin := \$$(sysupgrade_bin) | pad-to 7872k | append-metadata" \
+            "  SUPPORTED_DEVICES += fw28,v21" \
+            "endef" \
+            "TARGET_DEVICES += fw28-v21" \
+            >> target/linux/ramips/image/mt76x8.mk
 
-      - name: Write .config
+      - name: Update feeds
         run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Create base .config
+        run: |
+          # 生成初始配置（仅选择目标设备，不包含具体软件包）
           cat > .config <<'CONFIG'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
@@ -100,23 +105,44 @@ jobs:
           # CONFIG_IPV6 is not set
           CONFIG
 
-      - name: Feeds
+      - name: Expand config with olddefconfig
+        run: make olddefconfig
+
+      - name: Download all sources
+        run: make download -j$(nproc)
+
+      - name: Build firmware with verbose logging
+        run: make -j$(nproc) V=s
+
+      - name: Check firmware size
         run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          max_size=$((7872*1024))
+          fw_file=$(ls bin/targets/ramips/mt76x8/*factory.bin 2>/dev/null | head -1)
+          if [ -z "$fw_file" ]; then
+            echo "ERROR: No factory.bin file generated!"
+            exit 1
+          fi
+          actual_size=$(stat -c%s "$fw_file")
+          if [ $actual_size -gt $max_size ]; then
+            echo "ERROR: Firmware too large! ($actual_size > $max_size)"
+            exit 1
+          fi
+          echo "✅ Firmware size OK: $actual_size bytes"
 
-      - name: Defconfig
-        run: make defconfig
-
-      - name: Download
-        run: make download -j2
-
-      - name: Build
-        run: make -j1
-
-      - name: Upload
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: FW28-V21-Minimal
           path: bin/targets/ramips/mt76x8/*factory.bin
           if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            logs/
+            .config
+            build_dir/target-mipsel_24kc_musl/linux-ramips_mt76x8/linux-*/include/config/kernel.release
+          if-no-files-found: ignore
