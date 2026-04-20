@@ -3,6 +3,9 @@ name: Build FW28-V21 Minimal (No Fail)
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 消除 Node 20 弃用警告
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -17,7 +20,7 @@ jobs:
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
-          depth: 1
+          fetch-depth: 1
 
       - name: Prepare custom files
         run: |
@@ -58,7 +61,6 @@ jobs:
 
       - name: Add device definition
         run: |
-          # 确保文件末尾有换行符，并正确追加
           printf '\n%s\n' \
             "define Device/fw28-v21" \
             "  DEVICE_VENDOR := FW28" \
@@ -80,7 +82,6 @@ jobs:
 
       - name: Create base .config
         run: |
-          # 生成初始配置（仅选择目标设备，不包含具体软件包）
           cat > .config <<'CONFIG'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
@@ -105,13 +106,13 @@ jobs:
           # CONFIG_IPV6 is not set
           CONFIG
 
-      - name: Expand config with olddefconfig
+      - name: Expand config
         run: make olddefconfig
 
       - name: Download all sources
         run: make download -j$(nproc)
 
-      - name: Build firmware with verbose logging
+      - name: Build firmware
         run: make -j$(nproc) V=s
 
       - name: Check firmware size
@@ -135,14 +136,3 @@ jobs:
           name: FW28-V21-Minimal
           path: bin/targets/ramips/mt76x8/*factory.bin
           if-no-files-found: error
-
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: |
-            logs/
-            .config
-            build_dir/target-mipsel_24kc_musl/linux-ramips_mt76x8/linux-*/include/config/kernel.release
-          if-no-files-found: ignore
