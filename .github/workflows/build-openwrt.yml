@@ -1,454 +1,267 @@
-name: FW28-V21 UNISOC 4G 优化版 (稳定编译/自启/无IPv6/BBR)
+name: FW28-V21 优化版 (防卡死/加速/修复)
 
 on:
   workflow_dispatch:
-    inputs:
-      kernel_version:
-        description: '内核版本 (默认为5.15)'
-        required: false
-        default: '5.15'
-      enable_ipv6:
-        description: '是否启用IPv6'
-        required: false
-        default: false
-        type: boolean
 
 env:
+  CCACHE_DIR: ${{ github.workspace }}/ccache
   OPENWRT_DIR: openwrt
-  CACHE_PREFIX: ${{ github.run_id }}
-  JOBS: 2  # 保守的并发数，避免内存溢出
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120  # 设置超时时间
-    
-    steps:
-      - name: 检查仓库
-        uses: actions/checkout@v4
-        
-      - name: 设置环境变量
-        run: |
-          echo "OPENWRT_VERSION=23.05" >> $GITHUB_ENV
-          echo "TARGET_SUBTARGET=mt76x8" >> $GITHUB_ENV
-          echo "TARGET_PROFILE=fw28-v21" >> $GITHUB_ENV
-          echo "BUILD_DATE=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
+    timeout-minutes: 360
 
-      - name: 安装编译依赖 (精简版)
+    steps:
+      - name: 准备编译环境
         run: |
-          sudo apt-get update
-          # 只安装必要的依赖
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential \
-            libncurses5-dev \
-            gawk \
-            git \
-            libssl-dev \
-            rsync \
-            gettext \
-            wget \
-            unzip \
-            python3 \
-            python3-setuptools \
-            zlib1g-dev \
-            subversion \
-            time
-            
-      - name: 克隆 OpenWrt
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            build-essential libncurses-dev git python3 unzip wget gawk flex bison \
+            libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev \
+            libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib \
+            ccache
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESSLEVEL=5" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=500M" >> $GITHUB_ENV
+
+      - name: 克隆 OpenWrt 23.05
         uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
-          ref: openwrt-${{ env.OPENWRT_VERSION }}
+          ref: openwrt-23.05
           fetch-depth: 1
           path: ${{ env.OPENWRT_DIR }}
-          
-      - name: 设置设备定义
-        run: |
-          cd ${OPENWRT_DIR}
-          DEVICE_FILE="target/linux/ramips/image/mt76x8.mk"
-          
-          # 检查并备份原文件
-          if [ -f "$DEVICE_FILE" ]; then
-            cp "$DEVICE_FILE" "${DEVICE_FILE}.backup"
-          fi
-          
-          # 删除可能重复的定义
-          sed -i '/define Device\/fw28-v21/,/TARGET_DEVICES/d' "$DEVICE_FILE" 2>/dev/null || true
-          
-          # 添加设备定义
-          cat >> "$DEVICE_FILE" <<'DEVICE'
-define Device/fw28-v21
-  DEVICE_VENDOR := FW28
-  DEVICE_MODEL := V21
-  SOC := mt7628an
-  DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option \
-                     kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch \
-                     uqmi luci-proto-qmi kmod-tcp-bbr luci-compat \
-                     -kmod-rt2800-soc -wpad-basic-wolfssl
-  KERNEL_SIZE := 4096k
-  KERNEL := kernel-bin | lzma | \
-	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
-  IMAGES := sysupgrade.bin factory.bin
-  IMAGE_SIZE := 7808k
-  IMAGE/sysupgrade.bin := append-kernel | pad-to 64k | append-rootfs | \
-	pad-to-rootfs | check-size | append-metadata
-  IMAGE/factory.bin := $$(IMAGE/sysupgrade.bin) | pad-to 7808k
-  SUPPORTED_DEVICES += fw28-v21
-  DEVICE_PACKAGES := $$(filter-out kmod-rt2800-soc,$$(DEVICE_PACKAGES))
-endef
-TARGET_DEVICES += fw28-v21
-DEVICE
-          
-          echo "✅ 设备定义已设置"
 
-      - name: 配置缓存
+      - name: 恢复缓存
         uses: actions/cache@v4
-        id: openwrt-cache
         with:
           path: |
+            ${{ env.CCACHE_DIR }}
             ${{ env.OPENWRT_DIR }}/dl
-            ${{ env.OPENWRT_DIR }}/.ccache
-          key: ${{ runner.os }}-openwrt-dl-${{ env.CACHE_PREFIX }}-${{ hashFiles('${{ env.OPENWRT_DIR }}/feeds.conf.default') }}
+            ${{ env.OPENWRT_DIR }}/staging_dir
+            ${{ env.OPENWRT_DIR }}/build_dir
+          key: ${{ runner.os }}-fw28-v21-${{ hashFiles('${{ env.OPENWRT_DIR }}/.config') }}-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-openwrt-dl-${{ env.CACHE_PREFIX }}
-            ${{ runner.os }}-openwrt-dl-
-
-      - name: 更新 feeds
-        run: |
-          cd ${OPENWRT_DIR}
-          echo "开始更新feeds..."
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          echo "feeds更新完成"
-
-      - name: 写入默认配置
-        run: |
-          cd ${OPENWRT_DIR}
-          # 先生成基础配置
-          cat > .config <<'CONFIG'
-CONFIG_TARGET_ramips=y
-CONFIG_TARGET_ramips_mt76x8=y
-CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
-CONFIG_TARGET_ROOTFS_SQUASHFS=y
-CONFIG_TARGET_IMAGES_GZIP=y
-CONFIG_KERNEL_BUILD_USER="GitHub-Actions"
-CONFIG_KERNEL_BUILD_DOMAIN="github.com"
-# 基础包
-CONFIG_PACKAGE_kmod-usb2=y
-CONFIG_PACKAGE_kmod-usb-serial=y
-CONFIG_PACKAGE_kmod-usb-serial-option=y
-CONFIG_PACKAGE_kmod-usb-net=y
-CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
-CONFIG_PACKAGE_usb-modeswitch=y
-CONFIG_PACKAGE_uqmi=y
-CONFIG_PACKAGE_luci-proto-qmi=y
-CONFIG_PACKAGE_kmod-tcp-bbr=y
-# 网络基础
-CONFIG_PACKAGE_dnsmasq=y
-CONFIG_PACKAGE_dnsmasq-full=y
-CONFIG_PACKAGE_firewall=y
-CONFIG_PACKAGE_iptables=y
-CONFIG_PACKAGE_iptables-mod-conntrack-extra=y
-CONFIG_PACKAGE_iptables-mod-ipopt=y
-# 系统
-CONFIG_PACKAGE_dropbear=y
-CONFIG_PACKAGE_uhttpd=y
-CONFIG_PACKAGE_luci=y
-CONFIG_PACKAGE_luci-base=y
-CONFIG_PACKAGE_luci-compat=y
-CONFIG_PACKAGE_luci-theme-bootstrap=y
-CONFIG_PACKAGE_luci-app-firewall=y
-# 4G相关
-CONFIG_PACKAGE_comgt-ncm=y
-CONFIG_PACKAGE_kmod-usb-net-cdc-mbim=y
-CONFIG_PACKAGE_kmod-usb-net-rndis=y
-CONFIG_PACKAGE_libimobiledevice=y
-# IPv6配置
-CONFIG_IPV6=${{ github.event.inputs.enable_ipv6 && 'y' || 'n' }}
-CONFIG_PACKAGE_ipv6helper=${{ github.event.inputs.enable_ipv6 && 'y' || 'n' }}
-CONFIG_PACKAGE_ds-lite=${{ github.event.inputs.enable_ipv6 && 'y' || 'n' }}
-CONFIG_PACKAGE_6in4=${{ github.event.inputs.enable_ipv6 && 'y' || 'n' }}
-CONFIG_PACKAGE_6rd=${{ github.event.inputs.enable_ipv6 && 'y' || 'n' }}
-CONFIG_PACKAGE_6to4=${{ github.event.inputs.enable_ipv6 && 'y' || 'n' }}
-CONFIG
-          
-          echo "基础配置写入完成"
-
-      - name: 生成完整配置
-        run: |
-          cd ${OPENWRT_DIR}
-          echo "开始生成完整配置..."
-          # 使用非交互模式生成配置
-          yes "" | make oldconfig
-          
-          # 检查配置是否有效
-          if [ ! -f .config ]; then
-            echo "❌ 配置文件未生成"
-            exit 1
-          fi
-          
-          echo "✅ 配置文件生成完成"
-          echo "配置摘要:"
-          grep -E "^(CONFIG_TARGET|CONFIG_PACKAGE)" .config | head -20
-
-      - name: 下载源码包
-        run: |
-          cd ${OPENWRT_DIR}
-          echo "开始下载源码..."
-          
-          # 分步下载，监控进度
-          timeout 1800 make download -j$JOBS || {
-            echo "⚠️ 下载超时，重试中..."
-            make download -j1
-          }
-          
-          # 检查下载完整性
-          ./scripts/dl_cleanup.py
-          echo "✅ 源码下载完成"
+            ${{ runner.os }}-fw28-v21-${{ hashFiles('${{ env.OPENWRT_DIR }}/.config') }}-
+            ${{ runner.os }}-fw28-v21-
 
       - name: 写入定制文件
         run: |
-          mkdir -p ${OPENWRT_DIR}/files/etc/config \
-                   ${OPENWRT_DIR}/files/etc/rc.button \
-                   ${OPENWRT_DIR}/files/etc/hotplug.d/usb \
-                   ${OPENWRT_DIR}/files/usr/bin
-          
-          # 1. 网络配置
-          cat > ${OPENWRT_DIR}/files/etc/config/network <<'EOF'
-config interface 'loopback'
-    option device 'lo'
-    option proto 'static'
-    option ipaddr '127.0.0.1'
-    option netmask '255.0.0.0'
+          cd ${{ env.OPENWRT_DIR }}
+          mkdir -p files/etc/config \
+                   files/etc/usb_modeswitch.d \
+                   files/etc/init.d \
+                   files/etc/sysctl.d \
+                   files/etc/rc.d
 
-config device
-    option name 'br-lan'
-    option type 'bridge'
-    list ports 'eth0'
+          cat > files/etc/config/network <<'NETWORK'
+          config interface 'loopback'
+            option device 'lo'
+            option proto 'static'
+            option ipaddr '127.0.0.1'
+            option netmask '255.0.0.0'
 
-config interface 'lan'
-    option device 'br-lan'
-    option proto 'static'
-    option ipaddr '192.168.1.1'
-    option netmask '255.255.255.0'
-    option ip6assign '60'
+          config device
+            option name 'br-lan'
+            option type 'bridge'
+            list ports 'eth0'
 
-config interface 'wwan'
-    option proto 'qmi'
-    option device '/dev/cdc-wdm0'
-    option apn 'cmnet'
-    option auth 'none'
-    option pdptype 'ipv4'
-    option delay '5'
-    option metric '20'
-    option ipv6 '0'
-EOF
+          config interface 'lan'
+            option device 'br-lan'
+            option proto 'static'
+            option ipaddr '192.168.1.1'
+            option netmask '255.255.255.0'
 
-          # 2. 无线配置
-          cat > ${OPENWRT_DIR}/files/etc/config/wireless <<'EOF'
-config wifi-device 'radio0'
-    option type 'mac80211'
-    option path 'platform/10300000.wmac'
-    option channel '6'
-    option band '2g'
-    option htmode 'HT20'
-    option disabled '0'
-    option country 'CN'
-    option txpower '20'
+          config interface '4g'
+            option proto 'qmi'
+            option device '/dev/cdc-wdm0'
+            option apn 'cmnet'
+            option auth 'none'
+            option ipv6 '0'
+            option pdptype 'ipv4'
+            option delay '10'
+            option metric '10'
+          NETWORK
 
-config wifi-iface 'default_radio0'
-    option device 'radio0'
-    option network 'lan'
-    option mode 'ap'
-    option ssid 'FW28-V21-${{ env.BUILD_DATE }}'
-    option encryption 'psk2'
-    option key '12345678'
-EOF
+          cat > files/etc/config/wireless <<'WIFI'
+          config wifi-device 'radio0'
+            option type 'mac80211'
+            option band '2g'
+            option channel '6'
+            option htmode 'HT20'
+            option txpower '20'
+            option country 'CN'
+            option disabled '0'
 
-          # 3. 4G调制解调器初始化脚本
-          cat > ${OPENWRT_DIR}/files/etc/init.d/4g-setup <<'EOF'
-#!/bin/sh /etc/rc.common
-START=35
-STOP=99
+          config wifi-iface 'default_radio0'
+            option device 'radio0'
+            option network 'lan'
+            option mode 'ap'
+            option ssid 'FW28-V21'
+            option encryption 'psk2'
+            option key '12345678'
+          WIFI
 
-USE_PROCD=1
-PROG=/usr/bin/4g-modem-setup
+          cat > files/etc/usb_modeswitch.d/1782:4d15 <<'MODE'
+          DefaultVendor=0x1782
+          DefaultProduct=0x4d15
+          TargetClass=0xff
+          MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
+          MODE
 
-start_service() {
-    procd_open_instance
-    procd_set_param command "$PROG"
-    procd_set_param respawn
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
-}
+          cat > files/etc/init.d/4g-modem <<'INIT'
+          #!/bin/sh /etc/rc.common
+          START=35
+          USE_PROCD=1
 
-stop_service() {
-    killall -9 4g-modem-setup 2>/dev/null || true
-}
-EOF
-          chmod +x ${OPENWRT_DIR}/files/etc/init.d/4g-setup
+          start_service() {
+            /usr/sbin/usb_modeswitch -c /etc/usb_modeswitch.d/1782:4d15 2>/dev/null
+            sleep 3
+            modprobe usbserial 2>/dev/null
+            modprobe option 2>/dev/null
+            modprobe qmi_wwan 2>/dev/null
+            sleep 2
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              [ -e /dev/cdc-wdm0 ] && break
+              sleep 1
+            done
+          }
+          INIT
+          chmod +x files/etc/init.d/4g-modem
+          # 修复：使用绝对路径确保软链接正确
+          ln -sf /etc/init.d/4g-modem files/etc/rc.d/S354g-modem
 
-          # 4. 4G调制解调器设置脚本
-          cat > ${OPENWRT_DIR}/files/usr/bin/4g-modem-setup <<'EOF'
-#!/bin/sh
-logger -t 4G "开始初始化4G调制解调器..."
+          cat > files/etc/sysctl.d/10-bbr.conf <<'BBR'
+          net.core.default_qdisc = fq
+          net.ipv4.tcp_congestion_control = bbr
+          BBR
 
-# 加载必要的内核模块
-for module in usbserial option qmi_wwan; do
-    modprobe $module 2>/dev/null && logger -t 4G "已加载模块: $module"
-done
+          cat > files/etc/sysctl.d/01-disable-ipv6.conf <<'IP6'
+          net.ipv6.conf.all.disable_ipv6 = 1
+          net.ipv6.conf.default.disable_ipv6 = 1
+          net.ipv6.conf.lo.disable_ipv6 = 1
+          IP6
 
-# 等待设备出现
-for i in $(seq 1 30); do
-    if [ -c /dev/cdc-wdm0 ]; then
-        logger -t 4G "找到调制解调器设备: /dev/cdc-wdm0"
-        break
-    fi
-    sleep 1
-done
+          cat > files/etc/config/dhcp <<'DHCP'
+          config dnsmasq
+            option domainneeded '1'
+            option boguspriv '1'
+            option filterwin2k '0'
+            option localise_queries '1'
+            option rebind_protection '1'
+            option rebind_localhost '1'
+            option local '/lan/'
+            option domain 'lan'
+            option expandhosts '1'
+            option authoritative '1'
+            option readethers '1'
+            option leasefile '/tmp/dhcp.leases'
+            option noresolv '1'
+            list server '223.5.5.5'
+            list server '114.114.114.114'
 
-# 启用网络接口
-if [ -c /dev/cdc-wdm0 ]; then
-    uci set network.wwan.device='/dev/cdc-wdm0'
-    uci commit network
-    ifup wwan
-    logger -t 4G "4G网络接口已启用"
-else
-    logger -t 4G "错误: 未找到调制解调器设备"
-fi
-EOF
-          chmod +x ${OPENWRT_DIR}/files/usr/bin/4g-modem-setup
+          config dhcp 'lan'
+            option interface 'lan'
+            option start '100'
+            option limit '150'
+            option leasetime '12h'
+          DHCP
 
-          # 5. sysctl优化配置
-          mkdir -p ${OPENWRT_DIR}/files/etc/sysctl.d
-          cat > ${OPENWRT_DIR}/files/etc/sysctl.d/99-optimize.conf <<'EOF'
-# BBR拥塞控制
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-
-# TCP优化
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 1200
-
-# 内存优化
-vm.swappiness = 10
-vm.vfs_cache_pressure = 50
-EOF
-
-          if [ "${{ github.event.inputs.enable_ipv6 }}" = "false" ]; then
-            cat > ${OPENWRT_DIR}/files/etc/sysctl.d/01-disable-ipv6.conf <<'EOF'
-# 禁用IPv6
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-EOF
-          fi
-
-          # 6. 自动启动链接
-          ln -sf ../init.d/4g-setup ${OPENWRT_DIR}/files/etc/rc.d/S354g-setup
-          ln -sf ../init.d/4g-setup ${OPENWRT_DIR}/files/etc/rc.d/K904g-setup
-
-          echo "✅ 定制文件写入完成"
-
-      - name: 编译固件 (优化版)
+      - name: 添加设备定义
         run: |
-          cd ${OPENWRT_DIR}
-          echo "开始编译固件..."
-          echo "使用并发数: $JOBS"
-          echo "开始时间: $(date)"
-          
-          # 设置编译环境
-          export FORCE_UNSAFE_CONFIGURE=1
-          
-          # 分步编译，监控内存使用
-          {
-            # 编译工具链
-            make toolchain/install -j$JOBS || make toolchain/install -j1
-            
-            # 编译目标
-            make target/compile -j$JOBS || make target/compile -j1
-            
-            # 编译软件包
-            make package/compile -j$JOBS || make package/compile -j1
-            
-            # 最终打包
-            make target/install -j1
-            
-          } 2>&1 | tee build.log
-          
-          echo "结束时间: $(date)"
-          
-          # 检查编译结果
-          if [ $? -eq 0 ]; then
-            echo "✅ 编译成功"
-          else
-            echo "❌ 编译失败"
-            tail -100 build.log
+          cd ${{ env.OPENWRT_DIR }}
+          cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
+
+          define Device/fw28-v21
+            DEVICE_VENDOR := FW28
+            DEVICE_MODEL := V21
+            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi kmod-tcp-bbr
+            KERNEL_LOADADDR := 0x80000000
+            IMAGE_SIZE := 7872k
+            IMAGES += factory.bin
+            IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 7872k | append-metadata
+            SUPPORTED_DEVICES += fw28,v21
+          endef
+          TARGET_DEVICES += fw28-v21
+          DEV
+
+      - name: 更新 feeds
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 生成配置
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          cat > .config <<'CONFIG'
+          CONFIG_TARGET_ramips=y
+          CONFIG_TARGET_ramips_mt76x8=y
+          CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
+          CONFIG_SMALL_FLASH=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_PACKAGE_kmod-mt76x8=y
+          CONFIG_PACKAGE_kmod-usb-core=y
+          CONFIG_PACKAGE_kmod-usb2=y
+          CONFIG_PACKAGE_kmod-usb-serial=y
+          CONFIG_PACKAGE_kmod-usb-serial-option=y
+          CONFIG_PACKAGE_kmod-usb-net=y
+          CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
+          CONFIG_PACKAGE_usb-modeswitch=y
+          CONFIG_PACKAGE_uqmi=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-proto-qmi=y
+          CONFIG_PACKAGE_kmod-tcp-bbr=y
+          CONFIG_PACKAGE_dnsmasq=y
+          CONFIG_PACKAGE_firewall=y
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_dropbear=y
+          # CONFIG_IPV6 is not set
+          CONFIG_KERNEL_IPV6=n
+          CONFIG
+          # 关键修复：使用 defconfig 替代 oldconfig
+          make defconfig
+
+      - name: 增加 Swap 空间
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo sysctl vm.swappiness=10
+
+      - name: 下载源码
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          make download -j$(nproc)
+
+      - name: 编译固件
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          # 限制并行数防止内存溢出
+          make -j$(($(nproc)/2)) V=s
+
+      - name: 检查固件
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          max_size=$((7872*1024))
+          fw_file=$(ls bin/targets/ramips/mt76x8/*factory.bin 2>/dev/null | head -1)
+          if [ -z "$fw_file" ]; then
+            echo "错误：未生成 factory.bin"
             exit 1
           fi
-
-      - name: 验证固件
-        run: |
-矜          cd ${OPENWRT_DIR}
-          
-          # 查找固件
-          FW_FILE=$(find bin/targets/ramips/mt76x8 -name "*factory.bin" -o -name "*sysupgrade.bin" | head -1)
-          
-          if [ -z "$FW_FILE" ]; then
-            echo "❌ 未找到固件文件"
-            find bin/targets/ramips/mt76x8 -type f
+          actual_size=$(stat -c%s "$fw_file")
+          if [ $actual_size -gt $max_size ]; then
+            echo "错误：固件过大 ($actual_size > $max_size)"
             exit 1
           fi
-          
-          # 检查固件大小
-          FW_SIZE=$(stat -c%s "$FW_FILE")
-          MAX_SIZE=$((7808 * 1024))
-          
-          echo "固件文件: $FW_FILE"
-          echo "固件大小: $FW_SIZE 字节"
-          echo "最大限制: $MAX_SIZE 字节"
-          
-          if [ $FW_SIZE -gt $MAX_SIZE ]; then
-            echo "⚠️ 警告: 固件超出限制 ($((FW_SIZE - MAX_SIZE)) 字节)"
-            echo "尝试压缩..."
-            # 可以在这里添加压缩逻辑
-          else
-            echo "✅ 固件大小正常"
-          fi
-          
-          # 计算MD5
-          md5sum "$FW_FILE" > "$FW_FILE.md5"
-          echo "MD5: $(cat $FW_FILE.md5)"
+          echo "✅ 固件大小正常：$actual_size 字节"
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-${{ env.BUILD_DATE }}
-          path: |
-            ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*.bin
-            ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*.md5
-            ${{ env.OPENWRT_DIR }}/build.log
-          retention-days: 7
+          name: FW28-V21-OPTIMIZED
+          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
           if-no-files-found: error
-
-      - name: 编译报告
-        if: always()
-        run: |
-          echo "## 编译报告" >> $GITHUB_STEP_SUMMARY
-          echo "- **设备**: FW28-V21" >> $GITHUB_STEP_SUMMARY
-          echo "- **版本**: OpenWrt ${{ env.OPENWRT_VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **编译时间**: ${{ env.BUILD_DATE }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **IPv6**: ${{ github.event.inputs.enable_ipv6 }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **状态**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ job.status }}" = "success" ]; then
-            echo "✅ 编译成功！" >> $GITHUB_STEP_SUMMARY
-            echo "固件已上传到 Artifacts" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ 编译失败" >> $GITHUB_STEP_SUMMARY
-            echo "请检查日志" >> $GITHUB_STEP_SUMMARY
-          fi
