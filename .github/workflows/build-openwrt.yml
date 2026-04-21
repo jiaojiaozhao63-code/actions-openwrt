@@ -1,4 +1,4 @@
-name: FW28-V21 终极修复版 (XZ加速)
+name: FW28-V21 完整修复版 (Swap 修复)
 
 on:
   workflow_dispatch:
@@ -7,8 +7,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CCACHE_DIR: ${{ github.workspace }}/ccache
   OPENWRT_DIR: openwrt
-  # 【关键修复】强制 xz 使用快速模式，防止编译时卡死
-  XZ_OPT: "-1" 
+  XZ_OPT: "-1"
 
 jobs:
   build:
@@ -224,8 +223,13 @@ jobs:
           CONFIG
           make defconfig
 
-      - name: 增加 Swap 空间
+      - name: 增加 Swap 空间 (修复 Text file busy)
         run: |
+          # 强制关闭并删除旧的 swap 文件，防止占用错误
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile 2>/dev/null || true
+          
+          # 创建新 swap
           sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -240,5 +244,27 @@ jobs:
       - name: 编译固件
         run: |
           cd ${{ env.OPENWRT_DIR }}
-          # 使用 -j2 配合 XZ_OPT=-1 快速通过
           make -j2 V=s
+
+      - name: 检查固件
+        run: |
+          cd ${{ env.OPENWRT_DIR }}
+          max_size=$((7872*1024))
+          fw_file=$(ls bin/targets/ramips/mt76x8/*factory.bin 2>/dev/null | head -1)
+          if [ -z "$fw_file" ]; then
+            echo "错误：未生成 factory.bin"
+            exit 1
+          fi
+          actual_size=$(stat -c%s "$fw_file")
+          if [ $actual_size -gt $max_size ]; then
+            echo "错误：固件过大 ($actual_size > $max_size)"
+            exit 1
+          fi
+          echo "✅ 固件大小正常：$actual_size 字节"
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: FW28-V21-FINAL
+          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
+          if-no-files-found: error
