@@ -1,10 +1,10 @@
-name: FW28-V21 4G 最终稳定版（带错误诊断）
+name: FW28-V21 4G 最终稳定版（完整修复）
 
 on:
   workflow_dispatch:
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 消除 Node.js 20 警告
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   OPENWRT_DIR: openwrt
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
           ref: openwrt-23.05
           path: ${{ env.OPENWRT_DIR }}
 
-      - name: 清理旧缓存（避免残留问题）
+      - name: 清理残留缓存（避免卡死）
         run: |
           cd $OPENWRT_DIR
           rm -rf build_dir staging_dir dl .ccache feeds
@@ -33,12 +33,14 @@ jobs:
           cd $OPENWRT_DIR
           find . -name '*.mk' -exec sed -i 's|https\?://downloads.openwrt.org|https://mirrors.tuna.tsinghua.edu.cn/openwrt|g' {} \;
 
-      - name: 写入定制文件
+      - name: 写入定制文件（含开机自启）
         run: |
           mkdir -p $OPENWRT_DIR/files/etc/config \
                    $OPENWRT_DIR/files/etc/init.d \
-                   $OPENWRT_DIR/files/etc/sysctl.d
+                   $OPENWRT_DIR/files/etc/sysctl.d \
+                   $OPENWRT_DIR/files/etc/rc.d
 
+          # 网络配置（纯 IPv4 QMI）
           cat > $OPENWRT_DIR/files/etc/config/network <<'EOF'
           config interface 'loopback'
             option device 'lo'
@@ -63,6 +65,7 @@ jobs:
             option pdptype 'ipv4'
           EOF
 
+          # init.d 脚本（先切模式，再加载驱动）
           cat > $OPENWRT_DIR/files/etc/init.d/4g-modem <<'EOF'
           #!/bin/sh /etc/rc.common
           START=35
@@ -77,7 +80,7 @@ jobs:
           EOF
           chmod +x $OPENWRT_DIR/files/etc/init.d/4g-modem
 
-          # 启用开机自启
+          # 创建开机自启符号链接（目录已存在）
           ln -sf ../init.d/4g-modem $OPENWRT_DIR/files/etc/rc.d/S354g-modem
 
           # 禁用 IPv6 + 开启 BBR
@@ -88,10 +91,11 @@ jobs:
           net.ipv4.tcp_congestion_control=bbr
           EOF
 
-      - name: 添加设备定义
+      - name: 添加设备定义（无冲突）
         run: |
           cd $OPENWRT_DIR
-          cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
+          grep -q "fw28-v21" target/linux/ramips/image/mt76x8.mk || {
+            cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
 
           define Device/fw28-v21
             DEVICE_VENDOR := FW28
@@ -105,6 +109,7 @@ jobs:
           endef
           TARGET_DEVICES += fw28-v21
           DEV
+          }
 
       - name: 更新 feeds
         run: |
@@ -112,7 +117,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 生成完整 .config（自动补全，不会卡死）
+      - name: 生成完整 .config（自动补全，非交互）
         run: |
           cd $OPENWRT_DIR
           cat > .config <<'EOF'
@@ -129,13 +134,13 @@ jobs:
           # CONFIG_IPV6 is not set
           EOF
           export TERM=dumb
-          make defconfig   # 自动填充所有依赖，非交互
+          make defconfig
 
       - name: 下载源代码（串行 + 镜像）
         run: cd $OPENWRT_DIR && make download -j1
         timeout-minutes: 90
 
-      - name: 编译固件（单线程 + 详细日志）
+      - name: 编译固件（单线程，详细日志）
         run: cd $OPENWRT_DIR && make -j1 V=s
         timeout-minutes: 360
 
