@@ -5,6 +5,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  OPENWRT_DIR: openwrt  # 定义统一目录变量
 
 jobs:
   build:
@@ -24,35 +25,35 @@ jobs:
           repository: openwrt/openwrt
           ref: openwrt-23.05
           fetch-depth: 1
+          path: ${{ env.OPENWRT_DIR }}  # 克隆到 openwrt 目录
 
       # ==============================================
-      # 【已加入 B 方案：OpenWrt 编译缓存，提速 70%】
+      # 【已修复】B 方案：OpenWrt 编译缓存（路径已修正）
       # ==============================================
       - name: 缓存 OpenWrt 编译目录
         uses: actions/cache@v4
         with:
           path: |
-            .ccache
-            build_dir
-            staging_dir
-            dl
-            feeds
-          key: ${{ runner.os }}-openwrt-fw28-v21-${{ hashFiles('.config') }}
+            ${{ env.OPENWRT_DIR }}/.ccache
+            ${{ env.OPENWRT_DIR }}/build_dir
+            ${{ env.OPENWRT_DIR }}/staging_dir
+            ${{ env.OPENWRT_DIR }}/dl
+            ${{ env.OPENWRT_DIR }}/feeds
+          key: ${{ runner.os }}-openwrt-fw28-v21-${{ hashFiles('${{ env.OPENWRT_DIR }}/.config') }}
           restore-keys: |
             ${{ runner.os }}-openwrt-fw28-v21-
 
-      - name: 写入定制文件（含开机自启，无 lsusb 依赖）
+      - name: 写入定制文件（注意路径已修正）
         run: |
-          mkdir -p files/etc/config \
-                   files/etc/usb_modeswitch.d \
-                   files/etc/init.d \
-                   files/etc/sysctl.d \
-                   files/etc/rc.d
+          # 现在所有文件都要写入 openwrt/files 目录
+          mkdir -p ${OPENWRT_DIR}/files/etc/config \
+                   ${OPENWRT_DIR}/files/etc/usb_modeswitch.d \
+                   ${OPENWRT_DIR}/files/etc/init.d \
+                   ${OPENWRT_DIR}/files/etc/sysctl.d \
+                   ${OPENWRT_DIR}/files/etc/rc.d
 
-          # ------------------------------------------------------------
-          # 1. 网络配置：纯 IPv4，QMI P2P，增加 delay 等待设备
-          # ------------------------------------------------------------
-          cat > files/etc/config/network <<'NETWORK'
+          # 1. 网络配置
+          cat > ${OPENWRT_DIR}/files/etc/config/network <<'NETWORK'
           config interface 'loopback'
             option device 'lo'
             option proto 'static'
@@ -81,10 +82,8 @@ jobs:
             option metric '10'
           NETWORK
 
-          # ------------------------------------------------------------
-          # 2. WiFi 配置：自动检测硬件，固定信道6 HT20，最大功率
-          # ------------------------------------------------------------
-          cat > files/etc/config/wireless <<'WIFI'
+          # 2. WiFi 配置
+          cat > ${OPENWRT_DIR}/files/etc/config/wireless <<'WIFI'
           config wifi-device 'radio0'
             option type 'mac80211'
             option band '2g'
@@ -103,72 +102,53 @@ jobs:
             option key '12345678'
           WIFI
 
-          # ------------------------------------------------------------
-          # 3. 展锐专用 usb-modeswitch 规则（无多余参数）
-          #    注意：请根据你实际 lsusb 的 VID:PID 修改文件名和内容
-          # ------------------------------------------------------------
-          cat > files/etc/usb_modeswitch.d/1782:4d15 <<'MODE'
+          # 3. USB 模式切换
+          cat > ${OPENWRT_DIR}/files/etc/usb_modeswitch.d/1782:4d15 <<'MODE'
           DefaultVendor=0x1782
           DefaultProduct=0x4d15
           TargetClass=0xff
           MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
           MODE
 
-          # ------------------------------------------------------------
-          # 4. init.d 脚本：严格顺序（先切模式，再加载驱动）
-          #    不依赖 lsusb，直接等待 /dev/cdc-wdm0 出现
-          # ------------------------------------------------------------
-          cat > files/etc/init.d/4g-modem <<'INIT'
+          # 4. 开机自启脚本
+          cat > ${OPENWRT_DIR}/files/etc/init.d/4g-modem <<'INIT'
           #!/bin/sh /etc/rc.common
           START=35
           USE_PROCD=1
 
           start_service() {
-              # 第一步：切换 U盘模式 → 上网模式
               /usr/sbin/usb_modeswitch -c /etc/usb_modeswitch.d/1782:4d15 2>/dev/null
               sleep 3
-
-              # 第二步：按顺序加载驱动（usbserial → option → qmi_wwan）
               modprobe usbserial 2>/dev/null
               modprobe option 2>/dev/null
               modprobe qmi_wwan 2>/dev/null
               sleep 2
-
-              # 第三步：等待 cdc-wdm0 设备节点出现（最多等10秒）
               for i in 1 2 3 4 5 6 7 8 9 10; do
                   [ -e /dev/cdc-wdm0 ] && break
                   sleep 1
               done
           }
           INIT
-          chmod +x files/etc/init.d/4g-modem
+          chmod +x ${OPENWRT_DIR}/files/etc/init.d/4g-modem
 
-          # ------------------------------------------------------------
-          # 5. 启用开机自启（创建符号链接到 rc.d）
-          # ------------------------------------------------------------
-          ln -sf ../init.d/4g-modem files/etc/rc.d/S354g-modem
+          # 5. 启用自启链接
+          ln -sf ../init.d/4g-modem ${OPENWRT_DIR}/files/etc/rc.d/S354g-modem
 
-          # ------------------------------------------------------------
-          # 6. 开启 BBR 拥塞控制（海边弱信号优化）
-          # ------------------------------------------------------------
-          cat > files/etc/sysctl.d/10-bbr.conf <<'BBR'
+          # 6. BBR 配置
+          cat > ${OPENWRT_DIR}/files/etc/sysctl.d/10-bbr.conf <<'BBR'
           net.core.default_qdisc = fq
           net.ipv4.tcp_congestion_control = bbr
           BBR
 
-          # ------------------------------------------------------------
-          # 7. 彻底关闭 IPv6（内核+系统）
-          # ------------------------------------------------------------
-          cat > files/etc/sysctl.d/01-disable-ipv6.conf <<'IP6'
+          # 7. 关闭 IPv6
+          cat > ${OPENWRT_DIR}/files/etc/sysctl.d/01-disable-ipv6.conf <<'IP6'
           net.ipv6.conf.all.disable_ipv6 = 1
           net.ipv6.conf.default.disable_ipv6 = 1
           net.ipv6.conf.lo.disable_ipv6 = 1
           IP6
 
-          # ------------------------------------------------------------
-          # 8. DNS 优化（阿里 + 114，避免运营商 DNS 丢包）
-          # ------------------------------------------------------------
-          cat > files/etc/config/dhcp <<'DHCP'
+          # 8. DNS 优化
+          cat > ${OPENWRT_DIR}/files/etc/config/dhcp <<'DHCP'
           config dnsmasq
             option domainneeded '1'
             option boguspriv '1'
@@ -194,8 +174,10 @@ jobs:
             option leasetime '12h'
           DHCP
 
-      - name: 安全添加设备定义（不破坏原文件）
+      - name: 安全添加设备定义
         run: |
+          # 进入 openwrt 目录操作
+          cd ${OPENWRT_DIR}
           grep -q "fw28-v21" target/linux/ramips/image/mt76x8.mk || {
             cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
           define Device/fw28-v21
@@ -213,12 +195,11 @@ jobs:
           }
 
       - name: 更新 feeds
-        run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+        run: cd ${OPENWRT_DIR} && ./scripts/feeds update -a && ./scripts/feeds install -a
 
-      - name: 生成 .config（无 IPv6，包含所有必要软件包）
+      - name: 生成 .config（已修正路径）
         run: |
+          cd ${OPENWRT_DIR}
           cat > .config <<'CONFIG'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
@@ -247,17 +228,19 @@ jobs:
 
       - name: 扩展配置
         run: |
+          cd ${OPENWRT_DIR}
           export TERM=dumb
-          make olddefconfig
+          make olddefconfig  # 现在在正确的目录执行，缓存会生效！
 
       - name: 下载所有源码
-        run: make download -j$(nproc)
+        run: cd ${OPENWRT_DIR} && make download -j$(nproc)
 
       - name: 编译固件
-        run: make -j$(nproc) V=s
+        run: cd ${OPENWRT_DIR} && make -j$(nproc) V=s
 
       - name: 检查固件大小
         run: |
+          cd ${OPENWRT_DIR}
           max_size=$((7872*1024))
           fw_file=$(ls bin/targets/ramips/mt76x8/*factory.bin 2>/dev/null | head -1)
           if [ -z "$fw_file" ]; then
@@ -275,5 +258,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FW28-V21-FINAL-AUTO-START
-          path: bin/targets/ramips/mt76x8/*factory.bin
+          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
           if-no-files-found: error
