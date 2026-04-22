@@ -1,131 +1,106 @@
-name: Build FW28-V21 Fixed (Correct QMI Order)
-
-on:
-  workflow_dispatch:
-
+name: Build FW28-V21 Fixed (No Here-Doc Indent)
+on: workflow_dispatch
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   OPENWRT_DIR: openwrt
-
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential libncurses-dev git python3 unzip gawk flex bison libssl-dev wget
-
-      - name: Clone OpenWrt
-        uses: actions/checkout@v4
-        with:
-          repository: openwrt/openwrt
-          ref: openwrt-23.05
-          path: ${{ env.OPENWRT_DIR }}
-
-      - name: Use Tsinghua mirror
-        run: |
-          cd $OPENWRT_DIR
-          find . -name '*.mk' -exec sed -i 's|https\?://downloads.openwrt.org|https://mirrors.tuna.tsinghua.edu.cn/openwrt|g' {} \;
-
-      - name: Add custom files (correct order: switch then qmi_wwan)
-        run: |
-          mkdir -p $OPENWRT_DIR/files/etc/config \
-                   $OPENWRT_DIR/files/etc/init.d \
-                   $OPENWRT_DIR/files/etc/rc.d
-
-          cat > $OPENWRT_DIR/files/etc/config/network <<'EOF'
-          config interface 'loopback'
-            option device 'lo'
-            option proto 'static'
-            option ipaddr '127.0.0.1'
-
-          config device
-            option name 'br-lan'
-            type bridge
-            list ports 'eth0'
-
-          config interface 'lan'
-            option device 'br-lan'
-            option proto 'static'
-            option ipaddr '192.168.1.1'
-            option netmask '255.255.255.0'
-          EOF
-
-          cat > $OPENWRT_DIR/files/etc/init.d/4g-modem <<'EOF'
-          #!/bin/sh /etc/rc.common
-          START=35
-          USE_PROCD=1
-
-          start_service() {
-              /usr/sbin/usb_modeswitch -v 0x1782 -p 0x4d15 -M "5553424312345678000000000000061b000000020000000000000000000000"
-              sleep 3
-              modprobe usbserial 2>/dev/null
-              modprobe option 2>/dev/null
-              modprobe qmi_wwan 2>/dev/null
-              sleep 2
-          }
-          EOF
-          chmod +x $OPENWRT_DIR/files/etc/init.d/4g-modem
-          ln -sf ../init.d/4g-modem $OPENWRT_DIR/files/etc/rc.d/S354g-modem
-
-      - name: Add device definition (16MB flash)
-        run: |
-          cd $OPENWRT_DIR
-          grep -q "fw28-v21" target/linux/ramips/image/mt76x8.mk || {
-            cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
-
-          define Device/fw28-v21
-            DEVICE_VENDOR := FW28
-            DEVICE_MODEL := V21
-            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci luci-proto-qmi
-            KERNEL_LOADADDR := 0x80000000
-            IMAGE_SIZE := 16m
-            IMAGES += factory.bin
-            IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 16m | append-metadata
-            SUPPORTED_DEVICES += fw28,v21
-          endef
-          TARGET_DEVICES += fw28-v21
-          DEV
-          }
-
-      - name: Update feeds
-        run: |
-          cd $OPENWRT_DIR
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: Configure (IPv6 disabled, no BBR)
-        run: |
-          cd $OPENWRT_DIR
-          cat > .config <<'EOF'
-          CONFIG_TARGET_ramips=y
-          CONFIG_TARGET_ramips_mt76x8=y
-          CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
-          CONFIG_SMALL_FLASH=y
-          CONFIG_TARGET_ROOTFS_SQUASHFS=y
-          CONFIG_PACKAGE_kmod-usb2=y
-          CONFIG_PACKAGE_kmod-usb-serial=y
-          CONFIG_PACKAGE_kmod-usb-serial-option=y
-          CONFIG_PACKAGE_kmod-usb-net=y
-          CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
-          CONFIG_PACKAGE_usb-modeswitch=y
-          CONFIG_PACKAGE_uqmi=y
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-proto-qmi=y
-          # CONFIG_IPV6 is not set
-          EOF
-          export TERM=dumb
-          make defconfig
-
-      - name: Download sources
-        run: cd $OPENWRT_DIR && make download -j1
-
-      - name: Build firmware
-        run: cd $OPENWRT_DIR && make -j1 V=s
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FW28-V21-FIXED
-          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
+    - name: Install dependencies
+      run: sudo apt update && sudo apt install -y build-essential libncurses-dev git python3 unzip gawk flex bison libssl-dev wget
+    - name: Clone OpenWrt
+      uses: actions/checkout@v4
+      with:
+        repository: openwrt/openwrt
+        ref: openwrt-23.05
+        path: ${{ env.OPENWRT_DIR }}
+    - name: Use Tsinghua mirror
+      run: cd $OPENWRT_DIR && find . -name '*.mk' -exec sed -i 's|https\?://downloads.openwrt.org|https://mirrors.tuna.tsinghua.edu.cn/openwrt|g' {} \;
+    - name: Create network config
+      run: |
+        mkdir -p $OPENWRT_DIR/files/etc/config
+        printf '%s\n' \
+          'config interface loopback' \
+          '    option device lo' \
+          '    option proto static' \
+          '    option ipaddr 127.0.0.1' \
+          '' \
+          'config device' \
+          '    option name br-lan' \
+          '    type bridge' \
+          '    list ports eth0' \
+          '' \
+          'config interface lan' \
+          '    option device br-lan' \
+          '    option proto static' \
+          '    option ipaddr 192.168.1.1' \
+          '    option netmask 255.255.255.0' \
+          > $OPENWRT_DIR/files/etc/config/network
+    - name: Create 4G init script
+      run: |
+        mkdir -p $OPENWRT_DIR/files/etc/init.d $OPENWRT_DIR/files/etc/rc.d
+        printf '%s\n' \
+          '#!/bin/sh /etc/rc.common' \
+          'START=35' \
+          'USE_PROCD=1' \
+          'start_service() {' \
+          '    /usr/sbin/usb_modeswitch -v 0x1782 -p 0x4d15 -M "5553424312345678000000000000061b000000020000000000000000000000" -W' \
+          '    sleep 2' \
+          '    modprobe usbserial 2>/dev/null' \
+          '    modprobe option 2>/dev/null' \
+          '    modprobe qmi_wwan 2>/dev/null' \
+          '}' \
+          > $OPENWRT_DIR/files/etc/init.d/4g-modem
+        chmod +x $OPENWRT_DIR/files/etc/init.d/4g-modem
+        ln -sf ../init.d/4g-modem $OPENWRT_DIR/files/etc/rc.d/S354g-modem
+    - name: Add device definition
+      run: |
+        cd $OPENWRT_DIR
+        grep -q "fw28-v21" target/linux/ramips/image/mt76x8.mk && exit 0
+        printf '%s\n' \
+          '' \
+          'define Device/fw28-v21' \
+          '  DEVICE_VENDOR := FW28' \
+          '  DEVICE_MODEL := V21' \
+          '  DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci luci-proto-qmi' \
+          '  KERNEL_LOADADDR := 0x80000000' \
+          '  IMAGE_SIZE := 16m' \
+          '  IMAGES := factory.bin' \
+          '  IMAGE/factory.bin := append-rootfs | pad-rootfs | pad-to 16m | append-metadata' \
+          'endef' \
+          'TARGET_DEVICES += fw28-v21' \
+          >> target/linux/ramips/image/mt76x8.mk
+    - name: Update feeds
+      run: cd $OPENWRT_DIR && ./scripts/feeds update -a && ./scripts/feeds install -a
+    - name: Configure
+      run: |
+        cd $OPENWRT_DIR
+        printf '%s\n' \
+          'CONFIG_TARGET_ramips=y' \
+          'CONFIG_TARGET_ramips_mt76x8=y' \
+          'CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y' \
+          'CONFIG_SMALL_FLASH=y' \
+          'CONFIG_TARGET_ROOTFS_SQUASHFS=y' \
+          'CONFIG_PACKAGE_kmod-usb2=y' \
+          'CONFIG_PACKAGE_kmod-usb-serial=y' \
+          'CONFIG_PACKAGE_kmod-usb-serial-option=y' \
+          'CONFIG_PACKAGE_kmod-usb-net=y' \
+          'CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y' \
+          'CONFIG_PACKAGE_usb-modeswitch=y' \
+          'CONFIG_PACKAGE_uqmi=y' \
+          'CONFIG_PACKAGE_luci=y' \
+          'CONFIG_PACKAGE_luci-proto-qmi=y' \
+          'CONFIG_IPV6=n' \
+          'CONFIG_KERNEL_IPV6=n' \
+          > .config
+        export TERM=dumb && make defconfig
+    - name: Download sources
+      run: cd $OPENWRT_DIR && make download -j1
+    - name: Build firmware
+      run: cd $OPENWRT_DIR && make -j1 V=s
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: FW28-V21-FINAL
+        path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
