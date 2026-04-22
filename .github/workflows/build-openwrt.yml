@@ -1,4 +1,4 @@
-name: FW28-V21 最终绝对能跑版
+name: FW28-V21 最终修复版
 on:
   workflow_dispatch:
 
@@ -166,7 +166,7 @@ IP6
             option leasetime '12h'
 DHCP
 
-      - name: 添加设备定义（已100%修复）
+      - name: 添加设备定义
         run: |
           cd ${{ env.OPENWRT_DIR }}
           cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
@@ -255,7 +255,7 @@ CONFIG
           echo "✅ 固件大小正常"
 
       - name: 上传固件
-        uses: upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: FW28-V21-FINAL
           path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
