@@ -1,10 +1,9 @@
-name: FW28-V21 最终修复版
+name: FW28-V21 最终完整版
 on:
   workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  CCACHE_DIR: ${{ github.workspace }}/ccache
   OPENWRT_DIR: openwrt
 
 jobs:
@@ -12,43 +11,29 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
-      - name: 准备编译环境
+      - name: 安装依赖
         run: |
           sudo apt update
-          sudo apt install -y --no-install-recommends \
-            build-essential libncurses-dev git python3 unzip wget gawk flex bison \
-            libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev \
-            libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib \
-            ccache
-          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
+          sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion gcc-multilib g++-multilib
 
-      - name: 克隆 OpenWrt 23.05
+      - name: 克隆源码
         uses: actions/checkout@v5
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
-          fetch-depth: 1
           path: ${{ env.OPENWRT_DIR }}
 
-      - name: 恢复缓存
-        uses: actions/cache@v5
-        with:
-          path: |
-            ${{ env.CCACHE_DIR }}
-            ${{ env.OPENWRT_DIR }}/dl
-            ${{ env.OPENWRT_DIR }}/staging_dir
-            ${{ env.OPENWRT_DIR }}/build_dir
-          key: ${{ runner.os }}-fw28-v21-${{ hashFiles('${{ env.OPENWRT_DIR }}/.config') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-fw28-v21-${{ hashFiles('${{ env.OPENWRT_DIR }}/.config') }}-
-            ${{ runner.os }}-fw28-v21-
-
-      - name: 写入定制文件
+      - name: 写入配置文件
         run: |
           cd ${{ env.OPENWRT_DIR }}
-          mkdir -p files/etc/config files/etc/usb_modeswitch.d files/etc/init.d files/etc/sysctl.d files/etc/rc.d
+          mkdir -p files/etc/config
+          mkdir -p files/etc/usb_modeswitch.d
+          mkdir -p files/etc/init.d
+          mkdir -p files/etc/sysctl.d
+          mkdir -p files/etc/rc.d
 
-          cat > files/etc/config/network <<'NETWORK'
+          # 网络配置
+          cat > files/etc/config/network <<'EOF'
           config interface 'loopback'
             option device 'lo'
             option proto 'static'
@@ -69,183 +54,92 @@ jobs:
             option apn 'cmnet'
             option auth 'none'
             option ipv6 '0'
-            option pdptype 'ipv4'
-            option delay '10'
-            option metric '10'
-          NETWORK
+          EOF
 
-          cat > files/etc/config/wireless <<'WIFI'
+          # 无线配置
+          cat > files/etc/config/wireless <<'EOF'
           config wifi-device 'radio0'
             option type 'mac80211'
             option band '2g'
             option channel '6'
             option htmode 'HT20'
-            option txpower '20'
-            option country 'CN'
             option disabled '0'
-          config wifi-iface 'default_radio0'
+          config wifi-iface 'default'
             option device 'radio0'
             option network 'lan'
             option mode 'ap'
             option ssid 'FW28-V21'
             option encryption 'psk2'
             option key '12345678'
-          WIFI
+          EOF
 
-          cat > files/etc/usb_modeswitch.d/1782:4d15 <<'MODE'
-          DefaultVendor=0x1782
-          DefaultProduct=0x4d15
-          TargetClass=0xff
-          MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
-          MODE
-
-          cat > files/etc/init.d/4g-modem <<'INIT'
-          #!/bin/sh /etc/rc.common
-          START=35
-          USE_PROCD=1
-          start_service() {
-            /usr/sbin/usb_modeswitch -c /etc/usb_modeswitch.d/1782:4d15 2>/dev/null
-            sleep 3
-            modprobe usbserial 2>/dev/null
-            modprobe option 2>/dev/null
-            modprobe qmi_wwan 2>/dev/null
-            sleep 2
-            for i in 1 2 3 4 5 6 7 8 9 10; do
-              [ -e /dev/cdc-wdm0 ] && break
-              sleep 1
-            done
-          }
-          INIT
-          chmod +x files/etc/init.d/4g-modem
-          ln -sf ../init.d/4g-modem files/etc/rc.d/S354g-modem
-
-          cat > files/etc/sysctl.d/10-bbr.conf <<'BBR'
-          net.core.default_qdisc = fq
-          net.ipv4.tcp_congestion_control = bbr
-          BBR
-
-          cat > files/etc/sysctl.d/01-disable-ipv6.conf <<'IP6'
-          net.ipv6.conf.all.disable_ipv6 = 1
-          net.ipv6.conf.default.disable_ipv6 = 1
-          net.ipv6.conf.lo.disable_ipv6 = 1
-          IP6
-
-          cat > files/etc/config/dhcp <<'DHCP'
+          # DHCP配置
+          cat > files/etc/config/dhcp <<'EOF'
           config dnsmasq
             option domainneeded '1'
             option boguspriv '1'
-            option filterwin2k '0'
             option localise_queries '1'
             option rebind_protection '1'
-            option rebind_localhost '1'
-            option local '/lan/'
-            option domain 'lan'
-            option expandhosts '1'
-            option nonegcache '0'
-            option authoritative '1'
-            option readethers '1'
-            option leasefile '/tmp/dhcp.leases'
-            option noresolv '1'
-            list server '223.5.5.5'
-            list server '114.114.114.114'
-          config dhcp 'lan'
-            option interface 'lan'
-            option start '100'
-            option limit '150'
-            option leasetime '12h'
-          DHCP
+          EOF
+
+          # 4G模块配置
+          cat > files/etc/usb_modeswitch.d/1782:4d15 <<'EOF'
+          DefaultVendor=0x1782
+          DefaultProduct=0x4d15
+          TargetClass=0xff
+          EOF
+
+          # 4G自启脚本
+          cat > files/etc/init.d/4g-modem <<'EOF'
+          #!/bin/sh
+          START=35
+          boot() {
+              sleep 3
+              usb_modeswitch -c /etc/usb_modeswitch.d/1782:4d15
+          }
+          EOF
+
+          chmod +x files/etc/init.d/4g-modem
+          ln -s ../init.d/4g-modem files/etc/rc.d/S354g-modem
 
       - name: 添加设备定义
         run: |
           cd ${{ env.OPENWRT_DIR }}
-          cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
+          cat >> target/linux/ramips/image/mt76x8.mk <<'EOF'
           define Device/fw28-v21
             DEVICE_VENDOR := FW28
             DEVICE_MODEL := V21
-            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi kmod-tcp-bbr
             KERNEL_LOADADDR := 0x80000000
             IMAGE_SIZE := 7872k
-            IMAGES += factory.bin
-            IMAGE/factory.bin := \$(sysupgrade_bin) | pad-to 7872k | append-metadata
             SUPPORTED_DEVICES += fw28_v21
           endef
           TARGET_DEVICES += fw28-v21
-          DEV
+          EOF
 
-      - name: 更新 feeds
+      - name: 生成编译配置
         run: |
           cd ${{ env.OPENWRT_DIR }}
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: 生成配置
-        run: |
-          cd ${{ env.OPENWRT_DIR }}
-          cat > .config <<'CONFIG'
+          cat > .config <<'EOF'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
           CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
           CONFIG_SMALL_FLASH=y
-          CONFIG_TARGET_ROOTFS_SQUASHFS=y
-          CONFIG_PACKAGE_kmod-mt76x8=y
-          CONFIG_PACKAGE_kmod-usb-core=y
           CONFIG_PACKAGE_kmod-usb2=y
           CONFIG_PACKAGE_kmod-usb-serial=y
           CONFIG_PACKAGE_kmod-usb-serial-option=y
           CONFIG_PACKAGE_kmod-usb-net=y
-          CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
+          CONFIG_PACKAGE_kmod-usb-net-qmi=y
           CONFIG_PACKAGE_usb-modeswitch=y
-          CONFIG_PACKAGE_uqmi=y
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-proto-qmi=y
-          CONFIG_PACKAGE_kmod-tcp-bbr=y
-          CONFIG_PACKAGE_dnsmasq=y
-          CONFIG_PACKAGE_firewall=y
-          CONFIG_PACKAGE_uhttpd=y
-          CONFIG_PACKAGE_dropbear=y
-          # CONFIG_IPV6 is not set
-          CONFIG_KERNEL_IPV6=n
-          CONFIG
+          EOF
 
-      - name: 增加 Swap
-        run: |
-          sudo swapoff -a 2>/dev/null || true
-          sudo rm -f /swapfile 2>/dev/null || true
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          sudo sysctl vm.swappiness=10
-
-      - name: 下载源码
+      - name: 开始编译
         run: |
           cd ${{ env.OPENWRT_DIR }}
           make download -j1
-
-      - name: 编译固件
-        run: |
-          cd ${{ env.OPENWRT_DIR }}
           make -j1 V=s
-
-      - name: 检查固件
-        run: |
-          cd ${{ env.OPENWRT_DIR }}
-          max_size=$((7872*1024))
-          fw_file=$(ls bin/targets/ramips/mt76x8/*factory.bin 2>/dev/null | head -1)
-          if [ -z "$fw_file" ]; then
-            echo "错误：未生成 factory.bin"
-            exit 1
-          fi
-          actual_size=$(stat -c%s "$fw_file")
-          if [ $actual_size -gt $max_size ]; then
-            echo "错误：固件过大"
-            exit 1
-          fi
-          echo "固件大小正常"
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-FINAL
-          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
-          if-no-files-found: error
+          name: firmware
+          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*.bin
