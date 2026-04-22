@@ -1,4 +1,5 @@
-name: FW28-V21 稳定编译版
+name: Build FW28-V21 Fixed (Correct QMI Order)
+
 on:
   workflow_dispatch:
 
@@ -9,35 +10,40 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
     steps:
-      - name: 安装依赖
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y --no-install-recommends build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion gcc-multilib
+          sudo apt install -y build-essential libncurses-dev git python3 unzip gawk flex bison libssl-dev wget
 
-      - name: 克隆源码
-        uses: actions/checkout@v5
+      - name: Clone OpenWrt
+        uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
           path: ${{ env.OPENWRT_DIR }}
 
-      - name: 写入配置文件
+      - name: Use Tsinghua mirror
         run: |
-          cd ${{ env.OPENWRT_DIR }}
-          mkdir -p files/etc/config files/etc/usb_modeswitch.d files/etc/init.d files/etc/rc.d
+          cd $OPENWRT_DIR
+          find . -name '*.mk' -exec sed -i 's|https\?://downloads.openwrt.org|https://mirrors.tuna.tsinghua.edu.cn/openwrt|g' {} \;
 
-          cat > files/etc/config/network <<'EOF'
+      - name: Add custom files (correct order: switch then qmi_wwan)
+        run: |
+          mkdir -p $OPENWRT_DIR/files/etc/config \
+                   $OPENWRT_DIR/files/etc/init.d \
+                   $OPENWRT_DIR/files/etc/rc.d
+
+          # Minimal network config (LAN only, 4G will be added manually or via script)
+          cat > $OPENWRT_DIR/files/etc/config/network <<'EOF'
           config interface 'loopback'
             option device 'lo'
             option proto 'static'
             option ipaddr '127.0.0.1'
-            option netmask '255.0.0.0'
 
           config device
             option name 'br-lan'
-            option type 'bridge'
+            type bridge
             list ports 'eth0'
 
           config interface 'lan'
@@ -45,80 +51,87 @@ jobs:
             option proto 'static'
             option ipaddr '192.168.1.1'
             option netmask '255.255.255.0'
-
-          config interface '4g'
-            option proto 'qmi'
-            option device '/dev/cdc-wdm0'
-            option apn 'cmnet'
-            option auth 'none'
-            option ipv6 '0'
           EOF
 
-          cat > files/etc/config/wireless <<'EOF'
-          config wifi-device 'radio0'
-            option type 'mac80211'
-            option band '2g'
-            option channel '6'
-            option htmode 'HT20'
-            option disabled '0'
+          # Init script: switch mode first, then load qmi_wwan
+          cat > $OPENWRT_DIR/files/etc/init.d/4g-modem <<'EOF'
+          #!/bin/sh /etc/rc.common
+          START=35
+          USE_PROCD=1
 
-          config wifi-iface 'default_radio0'
-            option device 'radio0'
-            option network 'lan'
-            option mode 'ap'
-            option ssid 'FW28-V21'
-            option encryption 'psk2'
-            option key '12345678'
+          start_service() {
+              # Step 1: switch from storage mode to modem mode
+              /usr/sbin/usb_modeswitch -v 0x1782 -p 0x4d15 -M "5553424312345678000000000000061b000000020000000000000000000000"
+              sleep 3
+              # Step 2: ensure usbserial and option are loaded
+              modprobe usbserial 2>/dev/null
+              modprobe option 2>/dev/null
+              # Step 3: now load qmi_wwan
+              modprobe qmi_wwan 2>/dev/null
+              sleep 2
+              # Optionally, you can add uqmi commands here to auto-connect
+          }
           EOF
+          chmod +x $OPENWRT_DIR/files/etc/init.d/4g-modem
+          ln -sf ../init.d/4g-modem $OPENWRT_DIR/files/etc/rc.d/S354g-modem
 
-          cat > files/etc/config/dhcp <<'EOF'
-          config dnsmasq
-            option domainneeded '1'
-            option boguspriv '1'
-            option localise_queries '1'
-          EOF
-
-      - name: 添加设备定义
+      - name: Add device definition (16MB flash)
         run: |
-          cd ${{ env.OPENWRT_DIR }}
-          echo 'define Device/fw28-v21' >> target/linux/ramips/image/mt76x8.mk
-          echo '  DEVICE_VENDOR := FW28' >> target/linux/ramips/image/mt76x8.mk
-          echo '  DEVICE_MODEL := V21' >> target/linux/ramips/image/mt76x8.mk
-          echo '  KERNEL_LOADADDR := 0x80000000' >> target/linux/ramips/image/mt76x8.mk
-          echo '  IMAGE_SIZE := 7872k' >> target/linux/ramips/image/mt76x8.mk
-          echo '  SUPPORTED_DEVICES += fw28_v21' >> target/linux/ramips/image/mt76x8.mk
-          echo 'endef' >> target/linux/ramips/image/mt76x8.mk
-          echo 'TARGET_DEVICES += fw28-v21' >> target/linux/ramips/image/mt76x8.mk
+          cd $OPENWRT_DIR
+          grep -q "fw28-v21" target/linux/ramips/image/mt76x8.mk || {
+            cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
 
-      - name: 生成编译配置
+          define Device/fw28-v21
+            DEVICE_VENDOR := FW28
+            DEVICE_MODEL := V21
+            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci luci-proto-qmi
+            KERNEL_LOADADDR := 0x80000000
+            IMAGE_SIZE := 16m
+            IMAGES += factory.bin
+            IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 16m | append-metadata
+            SUPPORTED_DEVICES += fw28,v21
+          endef
+          TARGET_DEVICES += fw28-v21
+          DEV
+          }
+
+      - name: Update feeds
         run: |
-          cd ${{ env.OPENWRT_DIR }}
+          cd $OPENWRT_DIR
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure (IPv6 disabled, no BBR)
+        run: |
+          cd $OPENWRT_DIR
           cat > .config <<'EOF'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
           CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
           CONFIG_SMALL_FLASH=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_PACKAGE_kmod-usb2=y
           CONFIG_PACKAGE_kmod-usb-serial=y
-          CONFIG_PACKAGE_kmod-usb-net-qmi=y
+          CONFIG_PACKAGE_kmod-usb-serial-option=y
+          CONFIG_PACKAGE_kmod-usb-net=y
+          CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
           CONFIG_PACKAGE_usb-modeswitch=y
+          CONFIG_PACKAGE_uqmi=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-proto-qmi=y
+          # CONFIG_IPV6 is not set
           EOF
+          export TERM=dumb
+          make defconfig
 
-      - name: 增加 Swap 防止内存不足
-        run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+      - name: Download sources
+        run: cd $OPENWRT_DIR && make download -j1
 
-      - name: 编译固件
-        run: |
-          cd ${{ env.OPENWRT_DIR }}
-          make download -j1
-          make -j1 V=s
+      - name: Build firmware
+        run: cd $OPENWRT_DIR && make -j1 V=s
 
-      - name: 上传固件
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firmware
-          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*.bin
+          name: FW28-V21-FIXED
+          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
