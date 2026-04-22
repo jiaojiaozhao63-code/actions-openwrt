@@ -11,7 +11,6 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
-
     steps:
       - name: 准备编译环境
         run: |
@@ -47,11 +46,7 @@ jobs:
       - name: 写入定制文件
         run: |
           cd ${{ env.OPENWRT_DIR }}
-          mkdir -p files/etc/config \
-                   files/etc/usb_modeswitch.d \
-                   files/etc/init.d \
-                   files/etc/sysctl.d \
-                   files/etc/rc.d
+          mkdir -p files/etc/config files/etc/usb_modeswitch.d files/etc/init.d files/etc/sysctl.d files/etc/rc.d
 
           cat > files/etc/config/network <<'NETWORK'
           config interface 'loopback'
@@ -59,18 +54,15 @@ jobs:
             option proto 'static'
             option ipaddr '127.0.0.1'
             option netmask '255.0.0.0'
-
           config device
             option name 'br-lan'
             option type 'bridge'
             list ports 'eth0'
-
           config interface 'lan'
             option device 'br-lan'
             option proto 'static'
             option ipaddr '192.168.1.1'
             option netmask '255.255.255.0'
-
           config interface '4g'
             option proto 'qmi'
             option device '/dev/cdc-wdm0'
@@ -80,7 +72,7 @@ jobs:
             option pdptype 'ipv4'
             option delay '10'
             option metric '10'
-NETWORK
+          NETWORK
 
           cat > files/etc/config/wireless <<'WIFI'
           config wifi-device 'radio0'
@@ -91,7 +83,6 @@ NETWORK
             option txpower '20'
             option country 'CN'
             option disabled '0'
-
           config wifi-iface 'default_radio0'
             option device 'radio0'
             option network 'lan'
@@ -99,20 +90,19 @@ NETWORK
             option ssid 'FW28-V21'
             option encryption 'psk2'
             option key '12345678'
-WIFI
+          WIFI
 
           cat > files/etc/usb_modeswitch.d/1782:4d15 <<'MODE'
           DefaultVendor=0x1782
           DefaultProduct=0x4d15
           TargetClass=0xff
           MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
-MODE
+          MODE
 
           cat > files/etc/init.d/4g-modem <<'INIT'
           #!/bin/sh /etc/rc.common
           START=35
           USE_PROCD=1
-
           start_service() {
             /usr/sbin/usb_modeswitch -c /etc/usb_modeswitch.d/1782:4d15 2>/dev/null
             sleep 3
@@ -125,20 +115,20 @@ MODE
               sleep 1
             done
           }
-INIT
+          INIT
           chmod +x files/etc/init.d/4g-modem
           ln -sf ../init.d/4g-modem files/etc/rc.d/S354g-modem
 
           cat > files/etc/sysctl.d/10-bbr.conf <<'BBR'
           net.core.default_qdisc = fq
           net.ipv4.tcp_congestion_control = bbr
-BBR
+          BBR
 
           cat > files/etc/sysctl.d/01-disable-ipv6.conf <<'IP6'
           net.ipv6.conf.all.disable_ipv6 = 1
           net.ipv6.conf.default.disable_ipv6 = 1
           net.ipv6.conf.lo.disable_ipv6 = 1
-IP6
+          IP6
 
           cat > files/etc/config/dhcp <<'DHCP'
           config dnsmasq
@@ -158,30 +148,29 @@ IP6
             option noresolv '1'
             list server '223.5.5.5'
             list server '114.114.114.114'
-
           config dhcp 'lan'
             option interface 'lan'
             option start '100'
             option limit '150'
             option leasetime '12h'
-DHCP
+          DHCP
 
       - name: 添加设备定义
         run: |
           cd ${{ env.OPENWRT_DIR }}
           cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
-define Device/fw28-v21
-  DEVICE_VENDOR := FW28
-  DEVICE_MODEL := V21
-  DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi kmod-tcp-bbr
-  KERNEL_LOADADDR := 0x80000000
-  IMAGE_SIZE := 7872k
-  IMAGES += factory.bin
-  IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 7872k | append-metadata
-  SUPPORTED_DEVICES += fw28_v21
-endef
-TARGET_DEVICES += fw28-v21
-DEV
+          define Device/fw28-v21
+            DEVICE_VENDOR := FW28
+            DEVICE_MODEL := V21
+            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi kmod-tcp-bbr
+            KERNEL_LOADADDR := 0x80000000
+            IMAGE_SIZE := 7872k
+            IMAGES += factory.bin
+            IMAGE/factory.bin := \$(sysupgrade_bin) | pad-to 7872k | append-metadata
+            SUPPORTED_DEVICES += fw28_v21
+          endef
+          TARGET_DEVICES += fw28-v21
+          DEV
 
       - name: 更新 feeds
         run: |
@@ -193,30 +182,30 @@ DEV
         run: |
           cd ${{ env.OPENWRT_DIR }}
           cat > .config <<'CONFIG'
-CONFIG_TARGET_ramips=y
-CONFIG_TARGET_ramips_mt76x8=y
-CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
-CONFIG_SMALL_FLASH=y
-CONFIG_TARGET_ROOTFS_SQUASHFS=y
-CONFIG_PACKAGE_kmod-mt76x8=y
-CONFIG_PACKAGE_kmod-usb-core=y
-CONFIG_PACKAGE_kmod-usb2=y
-CONFIG_PACKAGE_kmod-usb-serial=y
-CONFIG_PACKAGE_kmod-usb-serial-option=y
-CONFIG_PACKAGE_kmod-usb-net=y
-CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
-CONFIG_PACKAGE_usb-modeswitch=y
-CONFIG_PACKAGE_uqmi=y
-CONFIG_PACKAGE_luci=y
-CONFIG_PACKAGE_luci-proto-qmi=y
-CONFIG_PACKAGE_kmod-tcp-bbr=y
-CONFIG_PACKAGE_dnsmasq=y
-CONFIG_PACKAGE_firewall=y
-CONFIG_PACKAGE_uhttpd=y
-CONFIG_PACKAGE_dropbear=y
-# CONFIG_IPV6 is not set
-CONFIG_KERNEL_IPV6=n
-CONFIG
+          CONFIG_TARGET_ramips=y
+          CONFIG_TARGET_ramips_mt76x8=y
+          CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
+          CONFIG_SMALL_FLASH=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_PACKAGE_kmod-mt76x8=y
+          CONFIG_PACKAGE_kmod-usb-core=y
+          CONFIG_PACKAGE_kmod-usb2=y
+          CONFIG_PACKAGE_kmod-usb-serial=y
+          CONFIG_PACKAGE_kmod-usb-serial-option=y
+          CONFIG_PACKAGE_kmod-usb-net=y
+          CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
+          CONFIG_PACKAGE_usb-modeswitch=y
+          CONFIG_PACKAGE_uqmi=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-proto-qmi=y
+          CONFIG_PACKAGE_kmod-tcp-bbr=y
+          CONFIG_PACKAGE_dnsmasq=y
+          CONFIG_PACKAGE_firewall=y
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_dropbear=y
+          # CONFIG_IPV6 is not set
+          CONFIG_KERNEL_IPV6=n
+          CONFIG
 
       - name: 增加 Swap
         run: |
@@ -252,7 +241,7 @@ CONFIG
             echo "错误：固件过大"
             exit 1
           fi
-          echo "✅ 固件大小正常"
+          echo "固件大小正常"
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
