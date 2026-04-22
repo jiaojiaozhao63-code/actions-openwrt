@@ -34,7 +34,6 @@ jobs:
                    $OPENWRT_DIR/files/etc/init.d \
                    $OPENWRT_DIR/files/etc/rc.d
 
-          # Minimal network config (LAN only, 4G will be added manually or via script)
           cat > $OPENWRT_DIR/files/etc/config/network <<'EOF'
           config interface 'loopback'
             option device 'lo'
@@ -53,23 +52,18 @@ jobs:
             option netmask '255.255.255.0'
           EOF
 
-          # Init script: switch mode first, then load qmi_wwan
           cat > $OPENWRT_DIR/files/etc/init.d/4g-modem <<'EOF'
           #!/bin/sh /etc/rc.common
           START=35
           USE_PROCD=1
 
           start_service() {
-              # Step 1: switch from storage mode to modem mode
               /usr/sbin/usb_modeswitch -v 0x1782 -p 0x4d15 -M "5553424312345678000000000000061b000000020000000000000000000000"
               sleep 3
-              # Step 2: ensure usbserial and option are loaded
               modprobe usbserial 2>/dev/null
               modprobe option 2>/dev/null
-              # Step 3: now load qmi_wwan
               modprobe qmi_wwan 2>/dev/null
               sleep 2
-              # Optionally, you can add uqmi commands here to auto-connect
           }
           EOF
           chmod +x $OPENWRT_DIR/files/etc/init.d/4g-modem
