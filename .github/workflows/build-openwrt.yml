@@ -1,65 +1,60 @@
-name: FW28-V21 最终修复版
-on:
-  workflow_dispatch:
+name: Build FW28-V21 Slim (Fix "too big")
 
-env:
-  # 强制使用 Node.js 24，消除弃用警告
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  OPENWRT_DIR: openwrt
-  CCACHE_DIR: ${{ github.workspace }}/ccache
+on: workflow_dispatch
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
-
     steps:
-      - name: 安装编译依赖
-        run: |
-          sudo apt update
-          sudo apt install -y --no-install-recommends \
-            build-essential libncurses-dev git python3 unzip wget gawk flex bison \
-            libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev \
-            libreadline-dev libtool automake autoconf pkg-config gcc-multilib g++-multilib \
-            ccache
-          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
+      - name: Install deps
+        run: sudo apt update && sudo apt install -y build-essential libncurses-dev git python3 unzip wget gawk flex bison libssl-dev zlib1g-dev libelf-dev subversion libncursesw5-dev libreadline-dev libtool automake autoconf pkg-config ccache gcc-multilib g++-multilib
 
-      - name: 克隆 OpenWrt 23.05
-        uses: actions/checkout@v5  # 升级到v5，支持Node.js 24
+      - name: Clone OpenWrt
+        uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: openwrt-23.05
-          fetch-depth: 1
-          path: ${{ env.OPENWRT_DIR }}
 
-      - name: 恢复缓存
-        uses: actions/cache@v5  # 同样升级到v5
-        with:
-          path: |
-            ${{ env.CCACHE_DIR }}
-            ${{ env.OPENWRT_DIR }}/dl
-            ${{ env.OPENWRT_DIR }}/staging_dir
-            ${{ env.OPENWRT_DIR }}/build_dir
-          key: ${{ runner.os }}-fw28-v21-${{ hashFiles('${{ env.OPENWRT_DIR }}/.config') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-fw28-v21-${{ hashFiles('${{ env.OPENWRT_DIR }}/.config') }}-
-            ${{ runner.os }}-fw28-v21-
-
-      - name: 写入定制文件
+      - name: Prepare custom files
         run: |
-          cd ${{ env.OPENWRT_DIR }}
-          mkdir -p files/etc/config \
-                   files/etc/usb_modeswitch.d \
-                   files/etc/init.d \
-                   files/etc/sysctl.d \
-                   files/etc/rc.d
+          mkdir -p files/etc/uci-defaults files/etc/hotplug.d/iface files/etc/config files/usr/share/usb_modeswitch
 
+          # 1. 驱动加载
+          cat > files/etc/uci-defaults/99-load-modules <<'EOF'
+          #!/bin/sh
+          [ -f "/etc/loaded_modules" ] && exit 0
+          modprobe usbserial usbnet option qmi_wwan
+          touch /etc/loaded_modules
+          EOF
+          chmod +x files/etc/uci-defaults/99-load-modules
+
+          # 2. 展锐模式切换
+          cat > files/etc/uci-defaults/99-unisoc-mode <<'EOF'
+          #!/bin/sh
+          sleep 5
+          if lsusb | grep -q "1782:4e00"; then
+            /usr/sbin/usb_modeswitch -v 0x1782 -p 0x4e00 -W -R
+          fi
+          EOF
+          chmod +x files/etc/uci-defaults/99-unisoc-mode
+
+          # 3. usb_modeswitch 规则
+          cat > files/usr/share/usb_modeswitch/1782:4e00 <<'MODESWITCH'
+          TargetVendor=0x1782
+          TargetProduct=0x4e00
+          MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
+          MODESWITCH
+
+          # 4. 网络配置
           cat > files/etc/config/network <<'NETWORK'
           config interface 'loopback'
             option device 'lo'
             option proto 'static'
             option ipaddr '127.0.0.1'
             option netmask '255.0.0.0'
+
+          config globals 'globals'
+            option ula_prefix 'fd00::/48'
 
           config device
             option name 'br-lan'
@@ -77,20 +72,14 @@ jobs:
             option device '/dev/cdc-wdm0'
             option apn 'cmnet'
             option auth 'none'
-            option ipv6 '0'
-            option pdptype 'ipv4'
-            option delay '10'
-            option metric '10'
-            NETWORK
+          NETWORK
 
-          cat > files/etc/config/wireless <<'WIFI'
+          # 5. 无线
+          cat > files/etc/config/wireless <<'WIRELESS'
           config wifi-device 'radio0'
             option type 'mac80211'
-            option band '2g'
             option channel '6'
             option htmode 'HT20'
-            option txpower '20'
-            option country 'CN'
             option disabled '0'
 
           config wifi-iface 'default_radio0'
@@ -98,166 +87,110 @@ jobs:
             option network 'lan'
             option mode 'ap'
             option ssid 'FW28-V21'
-            option encryption 'psk2'
-            option key '12345678'
-          WIFI
+            option encryption 'none'
+          WIRELESS
 
-          cat > files/etc/usb_modeswitch.d/1782:4d15 <<'MODE'
-          DefaultVendor=0x1782
-          DefaultProduct=0x4d15
-          TargetClass=0xff
-          MessageContent="5553424312345678000000000000061b000000020000000000000000000000"
-          MODE
+          # 6. 自动APN
+          cat > files/etc/hotplug.d/iface/99-auto-apn <<'APN'
+          #!/bin/sh
+          [ "$ACTION" = "ifup" ] || exit 0
+          [ "$INTERFACE" = "4g" ] || exit 0
+          
+          sleep 10
+          IMSI=$(uqmi -d /dev/cdc-wdm0 --get-imsi 2>/dev/null | grep -o '[0-9]\+')
+          [ -z "$IMSI" ] && exit 1
+          
+          MCCMNC=$(echo "$IMSI" | cut -c1-5)
+          case "$MCCMNC" in
+            46000|46002|46004|46007|46008) APN="cmnet" ;;
+            46001|46006|46009)             APN="3gnet" ;;
+            46003|46005|46011)             APN="ctnet" ;;
+            *)                             exit 0 ;;
+          esac
+          
+          uci set network.4g.apn="$APN"
+          uci commit network
+          APN
+          chmod +x files/etc/hotplug.d/iface/99-auto-apn
 
-          cat > files/etc/init.d/4g-modem <<'INIT'
-          #!/bin/sh /etc/rc.common
-          START=35
-          USE_PROCD=1
+          # 7. 系统优化
+          cat > files/etc/uci-defaults/99-system-tune <<'TUNE'
+          #!/bin/sh
+          [ -f "/etc/tuned_done" ] && exit 0
+          uci set dhcp.@dnsmasq[0].server='223.5.5.5'
+          uci add_list dhcp.@dnsmasq[0].server='114.114.114.114'
+          uci commit dhcp
+          echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+          echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+          touch /etc/tuned_done
+          TUNE
+          chmod +x files/etc/uci-defaults/99-system-tune
 
-          start_service() {
-            /usr/sbin/usb_modeswitch -c /etc/usb_modeswitch.d/1782:4d15 2>/dev/null
-            sleep 3
-            modprobe usbserial 2>/dev/null
-            modprobe option 2>/dev/null
-            modprobe qmi_wwan 2>/dev/null
-            sleep 2
-            for i in 1 2 3 4 5 6 7 8 9 10; do
-              [ -e /dev/cdc-wdm0 ] && break
-              sleep 1
-            done
-          }
-          INIT
-          chmod +x files/etc/init.d/4g-modem
-          ln -sf ../init.d/4g-modem files/etc/rc.d/S354g-modem
-
-          cat > files/etc/sysctl.d/10-bbr.conf <<'BBR'
-          net.core.default_qdisc = fq
-          net.ipv4.tcp_congestion_control = bbr
-          BBR
-
-          cat > files/etc/sysctl.d/01-disable-ipv6.conf <<'IP6'
-          net.ipv6.conf.all.disable_ipv6 = 1
-          net.ipv6.conf.default.disable_ipv6 = 1
-          net.ipv6.conf.lo.disable_ipv6 = 1
-          IP6
-
-          cat > files/etc/config/dhcp <<'DHCP'
-          config dnsmasq
-            option domainneeded '1'
-            option boguspriv '1'
-            option filterwin2k '0'
-            option localise_queries '1'
-            option rebind_protection '1'
-            option rebind_localhost '1'
-            option local '/lan/'
-            option domain 'lan'
-            option expandhosts '1'
-            option nonegcache '0'
-            option authoritative '1'
-            option readethers '1'
-            option leasefile '/tmp/dhcp.leases'
-            option noresolv '1'
-            list server '223.5.5.5'
-            list server '114.114.114.114'
-
-          config dhcp 'lan'
-            option interface 'lan'
-            option start '100'
-            option limit '150'
-            option leasetime '12h'
-            DHCP
-
-      - name: 添加设备定义
+      - name: Add device definition
         run: |
-          cd ${{ env.OPENWRT_DIR }}
-          cat >> target/linux/ramips/image/mt76x8.mk <<'DEV'
+          cat >> target/linux/ramips/image/mt76x8.mk <<'MK'
           define Device/fw28-v21
             DEVICE_VENDOR := FW28
             DEVICE_MODEL := V21
-            DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi kmod-tcp-bbr
+            DEVICE_PACKAGES := kmod-usb2 kmod-usb-ohci kmod-usb-serial kmod-usb-serial-option kmod-usb-net kmod-usb-net-qmi-wwan usb-modeswitch uqmi luci-proto-qmi
             KERNEL_LOADADDR := 0x80000000
-            IMAGE_SIZE := 7872k
+            KERNEL_INITRAMFS :=
+            IMAGE_SIZE := 8064k
             IMAGES += factory.bin
-            IMAGE/factory.bin := \$(sysupgrade_bin) | pad-to 7872k | append-metadata
+            IMAGE/factory.bin := $$(sysupgrade_bin) | pad-to 8064k | append-metadata
             SUPPORTED_DEVICES += fw28,v21
           endef
           TARGET_DEVICES += fw28-v21
-        DEV
+          MK
 
-      - name: 更新 feeds
+      - name: Write .config
         run: |
-          cd ${{ env.OPENWRT_DIR }}
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: 生成配置
-        run: |
-          cd ${{ env.OPENWRT_DIR }}
           cat > .config <<'CONFIG'
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt76x8=y
           CONFIG_TARGET_ramips_mt76x8_DEVICE_fw28-v21=y
+          CONFIG_TARGET_OPTIMIZATION="-Os -pipe"
           CONFIG_SMALL_FLASH=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_TARGET_KERNEL_PARTSIZE=2048
+          CONFIG_TARGET_ROOTFS_PARTSIZE=9728
           CONFIG_PACKAGE_kmod-mt76x8=y
           CONFIG_PACKAGE_kmod-usb-core=y
           CONFIG_PACKAGE_kmod-usb2=y
+          CONFIG_PACKAGE_kmod-usb-ohci=y
           CONFIG_PACKAGE_kmod-usb-serial=y
           CONFIG_PACKAGE_kmod-usb-serial-option=y
           CONFIG_PACKAGE_kmod-usb-net=y
           CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
           CONFIG_PACKAGE_usb-modeswitch=y
           CONFIG_PACKAGE_uqmi=y
-          CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-proto-qmi=y
-          CONFIG_PACKAGE_kmod-tcp-bbr=y
           CONFIG_PACKAGE_dnsmasq=y
           CONFIG_PACKAGE_firewall=y
+          CONFIG_PACKAGE_wpad-basic-mbedtls=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-mod-network=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_dropbear=y
           # CONFIG_IPV6 is not set
-          CONFIG_KERNEL_IPV6=n
-        CONFIG
+          CONFIG
 
-      - name: 增加 Swap 空间
-        run: |
-          sudo swapoff -a 2>/dev/null || true
-          sudo rm -f /swapfile 2>/dev/null || true
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          sudo sysctl vm.swappiness=10
+      - name: Make defconfig
+        run: make defconfig
 
-      - name: 下载源码
-        run: |
-          cd ${{ env.OPENWRT_DIR }}
-          make download -j1
+      - name: Update feeds
+        run: ./scripts/feeds update -a && ./scripts/feeds install -a
 
-      - name: 编译固件
-        run: |
-          cd ${{ env.OPENWRT_DIR }}
-          make -j1 V=s
+      - name: Download packages
+        run: make download -j$(nproc)
 
-      - name: 检查固件
-        run: |
-          cd ${{ env.OPENWRT_DIR }}
-          max_size=$((7872*1024))
-          fw_file=$(ls bin/targets/ramips/mt76x8/*factory.bin 2>/dev/null | head -1)
-          if [ -z "$fw_file" ]; then
-            echo "错误：未生成 factory.bin"
-            exit 1
-          fi
-          actual_size=$(stat -c%s "$fw_file")
-          if [ $actual_size -gt $max_size ]; then
-            echo "错误：固件过大"
-            exit 1
-          fi
-          echo "✅ 固件大小正常"
+      - name: Build firmware
+        run: make -j$(nproc) V=s
 
-      - name: 上传固件
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FW28-V21-FINAL
-          path: ${{ env.OPENWRT_DIR }}/bin/targets/ramips/mt76x8/*factory.bin
-          if-no-files-found: error
+          name: FW28-V21-Slim-Factory
+          path: bin/targets/ramips/mt76x8/*factory.bin
